@@ -63,6 +63,7 @@ export default function RoomPage({
   // Trickle ICE buffer (por si llegan candidates antes de setRemoteDescription)
   const pendingCandidatesRef = useRef<any[]>([]);
   const remoteDescSetRef = useRef(false);
+  const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const iceServersRef = useRef<RTCIceServer[] | null>(null);
 
@@ -164,7 +165,14 @@ export default function RoomPage({
     pc.onconnectionstatechange = () => {
         setConnState(pc.connectionState);
 
-        if (pc.connectionState === "connected") setAudioStatus("connected");
+        if (pc.connectionState === "connected") {
+            if (connectTimeoutRef.current) {
+                clearTimeout(connectTimeoutRef.current);
+                connectTimeoutRef.current = null;
+            }
+            setAudioStatus("connected");
+        }
+
 
         if (pc.connectionState === "failed") {
         setAudioStatus("error");
@@ -195,6 +203,61 @@ export default function RoomPage({
     return pc;
     }
 
+    async function recreatePcWithRelay() {
+    try {
+        pcRef.current?.close();
+    } catch {}
+    pcRef.current = null;
+    remoteDescSetRef.current = false;
+    pendingCandidatesRef.current = [];
+
+    const iceServers = await getIceServers();
+    const pc = new RTCPeerConnection({
+        iceServers,
+        iceTransportPolicy: "relay",
+    });
+
+    // vuelve a enganchar handlers igual que en ensurePeerConnection()
+    pc.onicecandidate = (ev) => {
+        if (ev.candidate) sendSignal({ kind: "ice", candidate: ev.candidate });
+    };
+    pc.onicecandidateerror = (e) => console.log("ICE ERROR (relay):", e);
+    pc.oniceconnectionstatechange = () => setIceState(pc.iceConnectionState);
+    pc.onconnectionstatechange = () => {
+        setConnState(pc.connectionState);
+        if (pc.connectionState === "connected") {
+            if (connectTimeoutRef.current) {
+                clearTimeout(connectTimeoutRef.current);
+                connectTimeoutRef.current = null;
+            }
+            setAudioStatus("connected");
+            }
+                    if (pc.connectionState === "failed") {
+        setAudioStatus("error");
+        setAudioError("WebRTC failed incluso con TURN (relay).");
+        }
+    };
+    pc.ontrack = async (ev) => {
+        const [stream] = ev.streams;
+        const el = remoteAudioRef.current;
+        if (!el) return;
+        el.srcObject = stream;
+        el.muted = false;
+        el.volume = 1;
+        setRemoteReady(true);
+        try {
+        await el.play();
+        setNeedsRemotePlay(false);
+        } catch {
+        setNeedsRemotePlay(true);
+        }
+    };
+
+    pcRef.current = pc;
+    return pc;
+    }
+
+
 
   async function startAudio() {
     try {
@@ -220,6 +283,32 @@ export default function RoomPage({
       // Caller determinista (evita offer-offer)
       const iAmCaller = my < peer;
       setAudioStatus("calling");
+      // Limpia timeout anterior si existiera
+        if (connectTimeoutRef.current) {
+        clearTimeout(connectTimeoutRef.current);
+        connectTimeoutRef.current = null;
+        }
+
+        connectTimeoutRef.current = setTimeout(async () => {
+        if (pc.connectionState !== "connected") {
+            console.log("⏱️ No conectó en 10s -> forzando TURN relay");
+            const newPc = await recreatePcWithRelay();
+
+            const local = localStreamRef.current;
+            if (local) {
+            for (const track of local.getAudioTracks()) newPc.addTrack(track, local);
+            }
+
+            const iAmCaller2 = my < peer;
+            if (iAmCaller2) {
+            const offer2 = await newPc.createOffer();
+            await newPc.setLocalDescription(offer2);
+            sendSignal({ kind: "offer", sdp: offer2 });
+            }
+        }
+        }, 10000);
+
+
 
       if (iAmCaller) {
         const offer = await pc.createOffer();
