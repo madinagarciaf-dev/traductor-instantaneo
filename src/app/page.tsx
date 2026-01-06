@@ -1,65 +1,111 @@
-import Image from "next/image";
+"use client";
+
+import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+
+const LANGS = [
+  { code: "es", label: "Español" },
+  { code: "en", label: "English" },
+  { code: "hu", label: "Magyar (Húngaro)" },
+  { code: "fr", label: "Français" },
+  { code: "de", label: "Deutsch" },
+  { code: "it", label: "Italiano" },
+];
+
+function randomRoomCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let out = "";
+  for (let i = 0; i < 6; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return out;
+}
 
 export default function Home() {
+  const router = useRouter();
+  const [myLang, setMyLang] = useState("es");
+  const [peerLang, setPeerLang] = useState("hu");
+  const [joinCode, setJoinCode] = useState("");
+
+  const shareText = useMemo(() => {
+    return `Mi idioma: ${myLang} | Tu idioma: ${peerLang}`;
+  }, [myLang, peerLang]);
+
+  const createRoom = () => {
+    const code = randomRoomCode();
+    router.push(`/room/${code}?my=${encodeURIComponent(myLang)}&peer=${encodeURIComponent(peerLang)}`);
+  };
+
+  const joinRoom = () => {
+    const code = joinCode.trim().toUpperCase();
+    if (!code) return;
+    router.push(`/room/${code}?my=${encodeURIComponent(myLang)}&peer=${encodeURIComponent(peerLang)}`);
+  };
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+    <main className="min-h-screen bg-neutral-950 text-neutral-100 flex items-center justify-center p-6">
+      <div className="w-full max-w-xl rounded-2xl bg-neutral-900/60 border border-neutral-800 p-6 shadow">
+        <h1 className="text-2xl font-semibold">Traductor instantáneo (MVP)</h1>
+        <p className="text-neutral-300 mt-2">
+          Prueba sin login. Crea una sala, comparte el código y entra desde otro móvil.
+        </p>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-6">
+          <div>
+            <label className="block text-sm text-neutral-300 mb-2">Mi idioma</label>
+            <select
+              value={myLang}
+              onChange={(e) => setMyLang(e.target.value)}
+              className="w-full rounded-xl bg-neutral-950 border border-neutral-800 p-3"
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+              {LANGS.map((l) => (
+                <option key={l.code} value={l.code}>
+                  {l.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm text-neutral-300 mb-2">Idioma de la otra persona</label>
+            <select
+              value={peerLang}
+              onChange={(e) => setPeerLang(e.target.value)}
+              className="w-full rounded-xl bg-neutral-950 border border-neutral-800 p-3"
             >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+              {LANGS.map((l) => (
+                <option key={l.code} value={l.code}>
+                  {l.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+
+        <div className="mt-6 flex flex-col sm:flex-row gap-3">
+          <button
+            onClick={createRoom}
+            className="flex-1 rounded-xl bg-white text-neutral-950 font-medium py-3 hover:opacity-90"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+            Crear sala
+          </button>
+
+          <div className="flex-1 flex gap-2">
+            <input
+              value={joinCode}
+              onChange={(e) => setJoinCode(e.target.value)}
+              placeholder="Código (ej. 7KQ2ZM)"
+              className="w-full rounded-xl bg-neutral-950 border border-neutral-800 p-3"
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+            <button
+              onClick={joinRoom}
+              className="rounded-xl bg-neutral-800 border border-neutral-700 px-4 hover:bg-neutral-700"
+            >
+              Unirme
+            </button>
+          </div>
         </div>
-      </main>
-    </div>
+
+        <p className="text-xs text-neutral-400 mt-4">{shareText}</p>
+      </div>
+    </main>
   );
 }
