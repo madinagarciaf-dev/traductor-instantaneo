@@ -64,6 +64,28 @@ export default function RoomPage({
   const pendingCandidatesRef = useRef<any[]>([]);
   const remoteDescSetRef = useRef(false);
 
+  const iceServersRef = useRef<RTCIceServer[] | null>(null);
+
+    async function getIceServers(): Promise<RTCIceServer[]> {
+    if (iceServersRef.current) return iceServersRef.current;
+
+    const r = await fetch("/api/ice", { cache: "no-store" });
+    if (!r.ok) throw new Error(`ICE servers fetch failed: ${r.status}`);
+
+    const data = await r.json();
+
+    // Normalizamos: RTCPeerConnection espera "urls"
+    const servers: RTCIceServer[] = (data.iceServers ?? []).map((s: any) => ({
+        urls: s.urls ?? s.url,              // Twilio a veces trae ambos
+        username: s.username,
+        credential: s.credential,
+    }));
+
+    iceServersRef.current = servers;
+    return servers;
+    }
+
+
   useEffect(() => {
     setWsStatus("connecting");
     const ws = new WebSocket(SIGNAL_URL);
@@ -115,32 +137,24 @@ export default function RoomPage({
     ws.send(JSON.stringify(msg));
   }
 
-  async function ensurePeerConnection() {
+    async function ensurePeerConnection() {
     if (pcRef.current) return pcRef.current;
 
+    const iceServers = await getIceServers();
+
     const pc = new RTCPeerConnection({
-        iceTransportPolicy: "relay", // 👈 fuerza que SOLO use TURN (nada de conexión directa)
-        iceServers: [
-            { urls: "stun:stun.l.google.com:19302" },
-            {
-            urls: [
-                "turn:openrelay.metered.ca:80",
-                "turn:openrelay.metered.ca:443",
-                "turns:openrelay.metered.ca:443",
-            ],
-            username: "openrelayproject",
-            credential: "openrelayproject",
-            },
-        ],
+        iceServers,
+        // Déjalo así al principio. Si aún diera problemas, luego forzamos "relay".
+        iceTransportPolicy: "all",
     });
 
-
     pc.onicecandidate = (ev) => {
-      if (ev.candidate) {
-        console.log("ICE CANDIDATE:", ev.candidate.candidate); // 👈 busca "typ relay"
+        if (ev.candidate) {
+        console.log("ICE CANDIDATE:", ev.candidate.candidate);
         sendSignal({ kind: "ice", candidate: ev.candidate });
-      }
+        }
     };
+
     pc.onicecandidateerror = (e) => {
         console.log("ICE ERROR:", e);
     };
@@ -148,40 +162,39 @@ export default function RoomPage({
     pc.oniceconnectionstatechange = () => setIceState(pc.iceConnectionState);
 
     pc.onconnectionstatechange = () => {
-      setConnState(pc.connectionState);
+        setConnState(pc.connectionState);
 
-      if (pc.connectionState === "connected") {
-        setAudioStatus("connected");
-      }
-      if (pc.connectionState === "failed") {
+        if (pc.connectionState === "connected") setAudioStatus("connected");
+
+        if (pc.connectionState === "failed") {
         setAudioStatus("error");
-        setAudioError("WebRTC connection failed (probable ICE/TURN issue).");
-      }
+        setAudioError("WebRTC connection failed (ICE/TURN).");
+        }
     };
 
     pc.ontrack = async (ev) => {
-      const [stream] = ev.streams;
-      const el = remoteAudioRef.current;
-      if (!el) return;
+        const [stream] = ev.streams;
+        const el = remoteAudioRef.current;
+        if (!el) return;
 
-      el.srcObject = stream;
-      el.muted = false;
-      el.volume = 1;
+        el.srcObject = stream;
+        el.muted = false;
+        el.volume = 1;
+        setRemoteReady(true);
 
-      setRemoteReady(true);
-
-      try {
+        try {
         await el.play();
         setNeedsRemotePlay(false);
-      } catch (e) {
+        } catch (e) {
         console.warn("remote audio play() blocked:", e);
         setNeedsRemotePlay(true);
-      }
+        }
     };
 
     pcRef.current = pc;
     return pc;
-  }
+    }
+
 
   async function startAudio() {
     try {
