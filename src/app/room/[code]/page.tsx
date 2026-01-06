@@ -89,7 +89,8 @@ export default function RoomPage({
 
   useEffect(() => {
     setWsStatus("connecting");
-    const ws = new WebSocket(SIGNAL_URL);
+    const ws = new WebSocket(`${SIGNAL_URL}?room=${encodeURIComponent(code)}`);
+
 
     wsRef.current = ws;
 
