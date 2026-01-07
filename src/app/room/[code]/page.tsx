@@ -3,31 +3,108 @@
 import { use, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
+const LANGS = [
+  { code: "es", label: "Español" },
+  { code: "en", label: "English" },
+  { code: "hu", label: "Magyar (Húngaro)" },
+  { code: "fr", label: "Français" },
+  { code: "de", label: "Deutsch" },
+  { code: "it", label: "Italiano" },
+];
+
+type Role = "creator" | "guest" | "unknown";
+
+type RoomState = {
+  creator: { name: string; lang: string };
+  guest: { name: string; lang: string };
+};
+
 type WsMsg =
   | { type: "join"; room: string }
   | { type: "peers"; count: number; room?: string; serverId?: string }
-  | { type: "hello"; serverId: string; clientId: string }
+  | { type: "hello"; serverId: string; clientId: string; role?: Role; roomState?: RoomState }
+  | { type: "room_state"; roomState: RoomState }
+  | { type: "init_room"; payload: RoomState }
+  | { type: "profile"; payload: { name?: string; lang?: string } }
   | { type: "signal"; payload: any };
 
-export default function RoomPage({
-  params,
+function initialsOf(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  const a = parts[0]?.[0] ?? "?";
+  const b = parts[1]?.[0] ?? "";
+  return (a + b).toUpperCase();
+}
+
+function langLabel(code: string) {
+  return LANGS.find((l) => l.code === code)?.label ?? code;
+}
+
+function ParticipantTile({
+  title,
+  name,
+  speaking,
+  waitingText,
 }: {
-  params: Promise<{ code: string }>;
+  title: string;
+  name: string;
+  speaking: boolean;
+  waitingText?: string;
 }) {
+  const initials = initialsOf(name);
+
+  return (
+    <div className="rounded-3xl bg-neutral-900/60 border border-neutral-800 p-6 shadow flex flex-col items-center justify-center min-h-[320px]">
+      <div className="text-sm text-neutral-400">{title}</div>
+
+      <div
+        className={[
+          "mt-6 h-44 w-44 rounded-full flex items-center justify-center text-5xl font-semibold select-none",
+          "bg-neutral-950 border border-neutral-800",
+          speaking ? "ring-4 ring-blue-400 shadow-[0_0_40px_rgba(59,130,246,0.45)] animate-pulse" : "",
+        ].join(" ")}
+      >
+        {initials}
+      </div>
+
+      <div className="mt-4 text-base text-neutral-200">{name || "Sin nombre"}</div>
+
+      {waitingText ? (
+        <div className="mt-2 text-sm text-neutral-400">{waitingText}</div>
+      ) : (
+        <div className="mt-2 text-sm text-neutral-500"> </div>
+      )}
+    </div>
+  );
+}
+
+export default function RoomPage({ params }: { params: Promise<{ code: string }> }) {
   const { code } = use(params);
 
   const sp = useSearchParams();
-  const my = sp.get("my") ?? "es";
-  const peer = sp.get("peer") ?? "hu";
+  const qsMy = sp.get("my") ?? "es"; // solo para init del creador (si viene)
+  const qsPeer = sp.get("peer") ?? "hu"; // solo para init del creador (si viene)
+  const qsName = sp.get("name") ?? "";
+  const qsPeerName = sp.get("peerName") ?? "";
+  const isInitHint = sp.get("init") === "1";
 
-  const invitePath = `/room/${code}?my=${encodeURIComponent(peer)}&peer=${encodeURIComponent(my)}`;
+  const SIGNAL_URL = process.env.NEXT_PUBLIC_SIGNAL_URL ?? "ws://localhost:3001";
 
   const [wsStatus, setWsStatus] = useState<"off" | "connecting" | "on">("off");
   const [peers, setPeers] = useState<number>(1);
 
-  const [audioStatus, setAudioStatus] = useState<
-    "idle" | "getting-mic" | "calling" | "connected" | "error"
-  >("idle");
+  const [serverId, setServerId] = useState<string>("-");
+  const [clientId, setClientId] = useState<string>("-");
+  const [myRole, setMyRole] = useState<Role>("unknown");
+
+  const [roomState, setRoomState] = useState<RoomState | null>(null);
+
+  // Drafts editables (tu usuario)
+  const [myNameDraft, setMyNameDraft] = useState<string>(qsName);
+  const [myLangDraft, setMyLangDraft] = useState<string>("");
+
+  // Audio P2P
+  const [audioStatus, setAudioStatus] = useState<"idle" | "getting-mic" | "calling" | "connected" | "error">("idle");
   const [audioError, setAudioError] = useState<string>("");
 
   const [iceState, setIceState] = useState<string>("new");
@@ -35,39 +112,41 @@ export default function RoomPage({
   const [remoteReady, setRemoteReady] = useState(false);
   const [needsRemotePlay, setNeedsRemotePlay] = useState(false);
 
-  // 🔥 Traducción (OpenAI Realtime)
+  // Traducción
   const [trStatus, setTrStatus] = useState<"idle" | "connecting" | "connected" | "error">("idle");
   const [trError, setTrError] = useState<string>("");
   const [needsTrPlay, setNeedsTrPlay] = useState(false);
-  const SIGNAL_URL = process.env.NEXT_PUBLIC_SIGNAL_URL ?? "ws://localhost:3001";
-  const [serverId, setServerId] = useState<string>("-");
-  const [clientId, setClientId] = useState<string>("-");
 
+  // speaking indicator
+  const [meSpeaking, setMeSpeaking] = useState(false);
+  const [otherSpeaking, setOtherSpeaking] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
 
-  // P2P (entre usuarios)
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // OpenAI Realtime (traducción local)
   const oaiPcRef = useRef<RTCPeerConnection | null>(null);
   const trAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Para “fabricar” un track local desde el audio remoto (más compatible que reusar remote track)
   const audioCtxRef = useRef<AudioContext | null>(null);
   const trSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const trDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
 
-  // Trickle ICE buffer (por si llegan candidates antes de setRemoteDescription)
   const pendingCandidatesRef = useRef<any[]>([]);
   const remoteDescSetRef = useRef(false);
   const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const iceServersRef = useRef<RTCIceServer[] | null>(null);
 
-    async function getIceServers(): Promise<RTCIceServer[]> {
+  // VAD cleanup
+  const vadCleanupLocalRef = useRef<null | (() => void)>(null);
+  const vadCleanupRemoteRef = useRef<null | (() => void)>(null);
+
+  const didInitRoomRef = useRef(false);
+
+  async function getIceServers(): Promise<RTCIceServer[]> {
     if (iceServersRef.current) return iceServersRef.current;
 
     const r = await fetch("/api/ice", { cache: "no-store" });
@@ -75,29 +154,95 @@ export default function RoomPage({
 
     const data = await r.json();
 
-    // Normalizamos: RTCPeerConnection espera "urls"
     const servers: RTCIceServer[] = (data.iceServers ?? []).map((s: any) => ({
-        urls: s.urls ?? s.url,              // Twilio a veces trae ambos
-        username: s.username,
-        credential: s.credential,
+      urls: s.urls ?? s.url,
+      username: s.username,
+      credential: s.credential,
     }));
 
     iceServersRef.current = servers;
     return servers;
+  }
+
+  function sendWs(obj: WsMsg) {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify(obj));
+  }
+
+  function sendSignal(payload: any) {
+    sendWs({ type: "signal", payload });
+  }
+
+  function setupVAD(stream: MediaStream, setSpeaking: (v: boolean) => void) {
+    try {
+      const AudioCtxCtor = window.AudioContext || ((window as any).webkitAudioContext as typeof AudioContext);
+      const ctx = new AudioCtxCtor();
+
+      const src = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      src.connect(analyser);
+
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      let raf = 0;
+
+      const tick = () => {
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) {
+          const v = (data[i] - 128) / 128;
+          sum += v * v;
+        }
+        const rms = Math.sqrt(sum / data.length); // 0..1 aprox
+        setSpeaking(rms > 0.03);
+        raf = requestAnimationFrame(tick);
+      };
+
+      tick();
+
+      return () => {
+        try {
+          cancelAnimationFrame(raf);
+        } catch {}
+        try {
+          src.disconnect();
+        } catch {}
+        try {
+          analyser.disconnect();
+        } catch {}
+        try {
+          ctx.close();
+        } catch {}
+      };
+    } catch {
+      return () => {};
     }
+  }
 
+  // ======= Derivados de estado de sala =======
+  const me = myRole === "creator" ? roomState?.creator : myRole === "guest" ? roomState?.guest : null;
+  const other = myRole === "creator" ? roomState?.guest : myRole === "guest" ? roomState?.creator : null;
 
+  const myLangEffective = (me?.lang || myLangDraft || qsMy).trim();
+  const peerLangEffective = (other?.lang || qsPeer).trim();
+
+  const myNameEffective = (me?.name || myNameDraft || "Yo").trim() || "Yo";
+  const otherNameEffective = (other?.name || (myRole === "creator" ? qsPeerName : "") || "Otra persona").trim() || "Otra persona";
+
+  const waitingText = peers < 2 ? `Esperando a ${otherNameEffective}…` : undefined;
+
+  // ======= WS connect =======
   useEffect(() => {
     setWsStatus("connecting");
+
+    // SIGNAL_URL debe ser .../ws
     const ws = new WebSocket(`${SIGNAL_URL}?room=${encodeURIComponent(code)}`);
-
-
     wsRef.current = ws;
 
     ws.onopen = () => {
       setWsStatus("on");
-      const join: WsMsg = { type: "join", room: code };
-      ws.send(JSON.stringify(join));
+      sendWs({ type: "join", room: code });
     };
 
     ws.onmessage = async (ev) => {
@@ -107,17 +252,72 @@ export default function RoomPage({
       } catch {
         return;
       }
-    if (msg.type === "hello") {
-    setServerId(msg.serverId ?? "-");
-    setClientId(msg.clientId ?? "-");
-    return;
-    }
 
-    if (msg.type === "peers" && typeof msg.count === "number") {
-    setPeers(msg.count);
-    if (msg.serverId) setServerId(msg.serverId);
-    return;
-    }
+      if (msg.type === "hello") {
+        setServerId(msg.serverId ?? "-");
+        setClientId(msg.clientId ?? "-");
+        const role: Role = msg.role ?? "unknown";
+        setMyRole(role);
+
+        if (msg.roomState) {
+          setRoomState(msg.roomState as RoomState);
+
+          // set draft de idioma si aún no tenemos
+          const myLangFromRoom =
+            role === "creator" ? msg.roomState.creator?.lang : role === "guest" ? msg.roomState.guest?.lang : "";
+          if (!myLangDraft && myLangFromRoom) setMyLangDraft(myLangFromRoom);
+        }
+
+        // INIT de sala: solo lo intenta el creator (el DO ignora si ya está init)
+        if (!didInitRoomRef.current && role === "creator") {
+          didInitRoomRef.current = true;
+
+          // Si vienes desde "Crear sala", esto trae idiomas + nombres
+          // Si entraste por código y eres el primero (poco común), usará defaults
+          const initState: RoomState = {
+            creator: { name: (qsName || "Yo").trim(), lang: (qsMy || "es").trim() },
+            guest: { name: (qsPeerName || "Otra persona").trim(), lang: (qsPeer || "hu").trim() },
+          };
+
+          // Solo intentamos init si hay "hint" o si no hay langs aún
+          const hasLangs = Boolean(msg.roomState?.creator?.lang && msg.roomState?.guest?.lang);
+          if (isInitHint || !hasLangs) {
+            sendWs({ type: "init_room", payload: initState });
+          }
+
+          // y setea tu propio perfil por si el estado estaba vacío
+          sendWs({ type: "profile", payload: { name: initState.creator.name, lang: initState.creator.lang } });
+        }
+
+        // Perfil del guest: manda su nombre (no pisa idioma)
+        if (role === "guest") {
+          if (qsName?.trim()) sendWs({ type: "profile", payload: { name: qsName.trim() } });
+        }
+
+        return;
+      }
+
+      if (msg.type === "peers" && typeof msg.count === "number") {
+        setPeers(msg.count);
+        if (msg.serverId) setServerId(msg.serverId);
+        return;
+      }
+
+      if (msg.type === "room_state") {
+        setRoomState(msg.roomState as RoomState);
+
+        // si todavía no has tocado el selector de idioma, hidrata draft
+        const nextMyLang =
+          myRole === "creator" ? msg.roomState.creator?.lang : myRole === "guest" ? msg.roomState.guest?.lang : "";
+        if (nextMyLang && !myLangDraft) setMyLangDraft(nextMyLang);
+
+        // hidrata nombre draft si viene vacío
+        const nextMyName =
+          myRole === "creator" ? msg.roomState.creator?.name : myRole === "guest" ? msg.roomState.guest?.name : "";
+        if (nextMyName && !myNameDraft) setMyNameDraft(nextMyName);
+
+        return;
+      }
 
       if (msg.type === "signal") {
         await handleSignal(msg.payload);
@@ -128,85 +328,86 @@ export default function RoomPage({
     ws.onerror = () => setWsStatus("off");
 
     return () => {
-      ws.close();
+      try {
+        ws.close();
+      } catch {}
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code]);
 
-  function sendSignal(payload: any) {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const msg: WsMsg = { type: "signal", payload };
-    ws.send(JSON.stringify(msg));
-  }
-
-    async function ensurePeerConnection() {
+  // ======= PeerConnection =======
+  async function ensurePeerConnection() {
     if (pcRef.current) return pcRef.current;
 
     const iceServers = await getIceServers();
 
     const pc = new RTCPeerConnection({
-        iceServers,
-        // Déjalo así al principio. Si aún diera problemas, luego forzamos "relay".
-        iceTransportPolicy: "all",
+      iceServers,
+      iceTransportPolicy: "all",
     });
 
     pc.onicecandidate = (ev) => {
-        if (ev.candidate) {
-        console.log("ICE CANDIDATE:", ev.candidate.candidate);
+      if (ev.candidate) {
         sendSignal({ kind: "ice", candidate: ev.candidate });
-        }
+      }
     };
 
     pc.onicecandidateerror = (e) => {
-        console.log("ICE ERROR:", e);
+      console.log("ICE ERROR:", e);
     };
 
     pc.oniceconnectionstatechange = () => setIceState(pc.iceConnectionState);
 
     pc.onconnectionstatechange = () => {
-        setConnState(pc.connectionState);
+      setConnState(pc.connectionState);
 
-        if (pc.connectionState === "connected") {
-            if (connectTimeoutRef.current) {
-                clearTimeout(connectTimeoutRef.current);
-                connectTimeoutRef.current = null;
-            }
-            setAudioStatus("connected");
+      if (pc.connectionState === "connected") {
+        if (connectTimeoutRef.current) {
+          clearTimeout(connectTimeoutRef.current);
+          connectTimeoutRef.current = null;
         }
+        setAudioStatus("connected");
+      }
 
-
-        if (pc.connectionState === "failed") {
+      if (pc.connectionState === "failed") {
         setAudioStatus("error");
         setAudioError("WebRTC connection failed (ICE/TURN).");
-        }
+      }
     };
 
     pc.ontrack = async (ev) => {
-        const [stream] = ev.streams;
-        const el = remoteAudioRef.current;
-        if (!el) return;
+      const [stream] = ev.streams;
+      const el = remoteAudioRef.current;
+      if (!el) return;
 
-        el.srcObject = stream;
-        el.muted = false;
-        el.volume = 1;
-        setRemoteReady(true);
+      el.srcObject = stream;
+      el.muted = false;
+      el.volume = 1;
 
-        try {
+      setRemoteReady(true);
+
+      // remote VAD
+      try {
+        vadCleanupRemoteRef.current?.();
+      } catch {}
+      vadCleanupRemoteRef.current = setupVAD(stream, setOtherSpeaking);
+
+      try {
         await el.play();
         setNeedsRemotePlay(false);
-        } catch (e) {
+      } catch (e) {
         console.warn("remote audio play() blocked:", e);
         setNeedsRemotePlay(true);
-        }
+      }
     };
 
     pcRef.current = pc;
     return pc;
-    }
+  }
 
-    async function recreatePcWithRelay() {
+  async function recreatePcWithRelay() {
     try {
-        pcRef.current?.close();
+      pcRef.current?.close();
     } catch {}
     pcRef.current = null;
     remoteDescSetRef.current = false;
@@ -214,51 +415,59 @@ export default function RoomPage({
 
     const iceServers = await getIceServers();
     const pc = new RTCPeerConnection({
-        iceServers,
-        iceTransportPolicy: "relay",
+      iceServers,
+      iceTransportPolicy: "relay",
     });
 
-    // vuelve a enganchar handlers igual que en ensurePeerConnection()
     pc.onicecandidate = (ev) => {
-        if (ev.candidate) sendSignal({ kind: "ice", candidate: ev.candidate });
+      if (ev.candidate) sendSignal({ kind: "ice", candidate: ev.candidate });
     };
     pc.onicecandidateerror = (e) => console.log("ICE ERROR (relay):", e);
     pc.oniceconnectionstatechange = () => setIceState(pc.iceConnectionState);
     pc.onconnectionstatechange = () => {
-        setConnState(pc.connectionState);
-        if (pc.connectionState === "connected") {
-            if (connectTimeoutRef.current) {
-                clearTimeout(connectTimeoutRef.current);
-                connectTimeoutRef.current = null;
-            }
-            setAudioStatus("connected");
-            }
-                    if (pc.connectionState === "failed") {
+      setConnState(pc.connectionState);
+
+      if (pc.connectionState === "connected") {
+        if (connectTimeoutRef.current) {
+          clearTimeout(connectTimeoutRef.current);
+          connectTimeoutRef.current = null;
+        }
+        setAudioStatus("connected");
+      }
+
+      if (pc.connectionState === "failed") {
         setAudioStatus("error");
         setAudioError("WebRTC failed incluso con TURN (relay).");
-        }
+      }
     };
+
     pc.ontrack = async (ev) => {
-        const [stream] = ev.streams;
-        const el = remoteAudioRef.current;
-        if (!el) return;
-        el.srcObject = stream;
-        el.muted = false;
-        el.volume = 1;
-        setRemoteReady(true);
-        try {
+      const [stream] = ev.streams;
+      const el = remoteAudioRef.current;
+      if (!el) return;
+
+      el.srcObject = stream;
+      el.muted = false;
+      el.volume = 1;
+
+      setRemoteReady(true);
+
+      try {
+        vadCleanupRemoteRef.current?.();
+      } catch {}
+      vadCleanupRemoteRef.current = setupVAD(stream, setOtherSpeaking);
+
+      try {
         await el.play();
         setNeedsRemotePlay(false);
-        } catch {
+      } catch {
         setNeedsRemotePlay(true);
-        }
+      }
     };
 
     pcRef.current = pc;
     return pc;
-    }
-
-
+  }
 
   async function startAudio() {
     try {
@@ -275,41 +484,45 @@ export default function RoomPage({
         },
         video: false,
       });
+
       localStreamRef.current = local;
+
+      // local VAD
+      try {
+        vadCleanupLocalRef.current?.();
+      } catch {}
+      vadCleanupLocalRef.current = setupVAD(local, setMeSpeaking);
 
       for (const track of local.getAudioTracks()) {
         pc.addTrack(track, local);
       }
 
-      // Caller determinista (evita offer-offer)
-      const iAmCaller = my < peer;
+      const iAmCaller = myLangEffective < peerLangEffective; // determinista
       setAudioStatus("calling");
-      // Limpia timeout anterior si existiera
-        if (connectTimeoutRef.current) {
+
+      if (connectTimeoutRef.current) {
         clearTimeout(connectTimeoutRef.current);
         connectTimeoutRef.current = null;
-        }
+      }
 
-        connectTimeoutRef.current = setTimeout(async () => {
+      connectTimeoutRef.current = setTimeout(async () => {
         if (pc.connectionState !== "connected") {
-            console.log("⏱️ No conectó en 10s -> forzando TURN relay");
-            const newPc = await recreatePcWithRelay();
+          console.log("⏱️ No conectó en 10s -> forzando TURN relay");
+          const newPc = await recreatePcWithRelay();
 
-            const local = localStreamRef.current;
-            if (local) {
-            for (const track of local.getAudioTracks()) newPc.addTrack(track, local);
-            }
+          const local2 = localStreamRef.current;
+          if (local2) {
+            for (const track of local2.getAudioTracks()) newPc.addTrack(track, local2);
+          }
 
-            const iAmCaller2 = my < peer;
-            if (iAmCaller2) {
+          const iAmCaller2 = myLangEffective < peerLangEffective;
+          if (iAmCaller2) {
             const offer2 = await newPc.createOffer();
             await newPc.setLocalDescription(offer2);
             sendSignal({ kind: "offer", sdp: offer2 });
-            }
+          }
         }
-        }, 10000);
-
-
+      }, 10000);
 
       if (iAmCaller) {
         const offer = await pc.createOffer();
@@ -366,38 +579,30 @@ export default function RoomPage({
     }
   };
 
-  // ============================
-  // 🔥 TRADUCCIÓN (OpenAI Realtime)
-  // ============================
-
+  // ======= Traducción OpenAI =======
   const startTranslation = async () => {
     try {
       setTrError("");
       setNeedsTrPlay(false);
 
-      // Necesitamos stream remoto para traducir
       const remoteStream = remoteAudioRef.current?.srcObject as MediaStream | null;
       if (!remoteStream) throw new Error("Aún no hay audio remoto. Conecta el audio P2P primero.");
 
       setTrStatus("connecting");
 
-      // 1) Token efímero (tu endpoint)
       const tokenRes = await fetch(
-        `/api/realtime-token?my=${encodeURIComponent(my)}&peer=${encodeURIComponent(peer)}&voice=alloy`
+        `/api/realtime-token?my=${encodeURIComponent(myLangEffective)}&peer=${encodeURIComponent(peerLangEffective)}&voice=alloy`
       );
       const tokenData = await tokenRes.json();
       const EPHEMERAL_KEY = tokenData?.value;
       if (!EPHEMERAL_KEY) throw new Error("No llegó client_secret (ek_...) desde /api/realtime-token");
 
-      // 2) Crear un track LOCAL desde el stream remoto (WebAudio)
-      const AudioCtxCtor =
-        window.AudioContext || ((window as any).webkitAudioContext as typeof AudioContext);
+      const AudioCtxCtor = window.AudioContext || ((window as any).webkitAudioContext as typeof AudioContext);
       const ac = audioCtxRef.current ?? new AudioCtxCtor();
       audioCtxRef.current = ac;
 
       if (ac.state === "suspended") await ac.resume();
 
-      // Limpieza si reinicias
       try {
         trSourceRef.current?.disconnect();
       } catch {}
@@ -412,11 +617,9 @@ export default function RoomPage({
       const inputTrack = dest.stream.getAudioTracks()[0];
       if (!inputTrack) throw new Error("No se pudo obtener track de audio para traducir.");
 
-      // 3) Conectar WebRTC con OpenAI Realtime (ephemeral token)
       const oaiPc = new RTCPeerConnection();
       oaiPcRef.current = oaiPc;
 
-      // Reproducir audio traducido del modelo
       oaiPc.ontrack = async (e) => {
         const el = trAudioRef.current;
         if (!el) return;
@@ -425,7 +628,6 @@ export default function RoomPage({
         el.muted = false;
         el.volume = 1;
 
-        // Cuando ya tenemos traducción, muteamos el audio original
         if (remoteAudioRef.current) remoteAudioRef.current.muted = true;
 
         try {
@@ -437,7 +639,6 @@ export default function RoomPage({
         }
       };
 
-      // DataChannel opcional (sirve para ver eventos en consola)
       const dc = oaiPc.createDataChannel("oai-events");
       dc.addEventListener("message", (ev) => {
         try {
@@ -447,13 +648,11 @@ export default function RoomPage({
         }
       });
 
-      // Añadimos el “micro” (que en realidad es el audio remoto)
       oaiPc.addTrack(inputTrack, dest.stream);
 
       const offer = await oaiPc.createOffer();
       await oaiPc.setLocalDescription(offer);
 
-      // POST SDP al endpoint de calls con Bearer ephemeral key
       const sdpResponse = await fetch("https://api.openai.com/v1/realtime/calls", {
         method: "POST",
         body: offer.sdp,
@@ -486,20 +685,17 @@ export default function RoomPage({
   };
 
   const stopTranslation = async () => {
-    // Cierra PC de OpenAI
     try {
       oaiPcRef.current?.close();
     } catch {}
     oaiPcRef.current = null;
 
-    // Desconecta audio graph
     try {
       trSourceRef.current?.disconnect();
     } catch {}
     trSourceRef.current = null;
     trDestRef.current = null;
 
-    // Rehabilita audio original
     if (remoteAudioRef.current) remoteAudioRef.current.muted = false;
 
     setNeedsTrPlay(false);
@@ -508,12 +704,27 @@ export default function RoomPage({
   };
 
   const copyInvite = async () => {
-    const full = `${window.location.origin}${invitePath}`;
+    const full = `${window.location.origin}/room/${code}`;
     try {
       await navigator.clipboard.writeText(full);
       alert("Enlace copiado ✅");
     } catch {
       prompt("Copia este enlace:", full);
+    }
+  };
+
+  // ======= Guardar perfil (tu nombre / tu idioma) =======
+  const saveMyName = () => {
+    const v = myNameDraft.trim();
+    setMyNameDraft(v);
+    sendWs({ type: "profile", payload: { name: v } });
+  };
+
+  const onChangeMyLang = (v: string) => {
+    setMyLangDraft(v);
+    // Solo permitimos cambiar idioma si NO hay traducción activa (como pediste)
+    if (trStatus === "idle") {
+      sendWs({ type: "profile", payload: { lang: v } });
     }
   };
 
@@ -529,133 +740,142 @@ export default function RoomPage({
       : "Error de audio";
 
   return (
-    <main className="min-h-screen bg-neutral-950 text-neutral-100 flex items-center justify-center p-6">
-      <div className="w-full max-w-xl rounded-2xl bg-neutral-900/60 border border-neutral-800 p-6 shadow">
-        <h1 className="text-2xl font-semibold">Sala: {code}</h1>
-
-        <p className="text-neutral-300 mt-2">
-          Tú: <span className="font-medium">{my}</span> · Otra persona:{" "}
-          <span className="font-medium">{peer}</span>
-        </p>
-
-        <div className="mt-4 flex items-center justify-between rounded-xl bg-neutral-950 border border-neutral-800 p-4">
-          <div className="text-sm text-neutral-300">
-            Señalización:{" "}
-            <span className="font-medium">
-              {wsStatus === "on" ? "Conectado" : wsStatus === "connecting" ? "Conectando..." : "Desconectado"}
-            </span>
-          </div>
-          <div className="text-sm text-neutral-300">
-            Personas en sala: <span className="font-medium">{peers}</span>
+    <main className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col">
+      {/* Top bar */}
+      <header className="px-6 py-4 border-b border-neutral-800 flex items-center justify-between gap-4">
+        <div>
+          <div className="text-lg font-semibold">Sala {code}</div>
+          <div className="text-xs text-neutral-400">
+            Señalización: {wsStatus} · Personas: {peers} · ICE: {iceState} · Conn: {connState}
           </div>
         </div>
 
-        {/* Audio P2P */}
-        <div className="mt-4 rounded-xl bg-neutral-950 border border-neutral-800 p-4">
-          <div className="flex items-center justify-between gap-3">
+        <button
+          onClick={copyInvite}
+          className="rounded-xl bg-neutral-800 border border-neutral-700 px-4 py-2 hover:bg-neutral-700"
+        >
+          Copiar enlace
+        </button>
+      </header>
+
+      {/* Tiles */}
+      <section className="flex-1 p-6 flex items-center justify-center">
+        <div className={`w-full max-w-5xl grid gap-6 ${peers >= 2 ? "grid-cols-1 md:grid-cols-2" : "grid-cols-1"}`}>
+          <ParticipantTile title="Yo" name={myNameEffective} speaking={meSpeaking} waitingText={waitingText} />
+
+          {peers >= 2 && (
+            <ParticipantTile title="Otro" name={otherNameEffective} speaking={otherSpeaking} />
+          )}
+        </div>
+      </section>
+
+      {/* Controls */}
+      <footer className="px-6 py-5 border-t border-neutral-800 bg-neutral-950/60">
+        <div className="flex flex-col gap-4">
+          {/* Row buttons */}
+          <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+            <div className="flex gap-3">
+              <button
+                onClick={startAudio}
+                disabled={audioStatus !== "idle"}
+                className="rounded-xl bg-white text-neutral-950 font-medium px-4 py-2 hover:opacity-90 disabled:opacity-50"
+              >
+                {audioLabel}
+              </button>
+
+              {trStatus === "idle" ? (
+                <button
+                  onClick={startTranslation}
+                  disabled={!remoteReady}
+                  className="rounded-xl bg-white text-neutral-950 font-medium px-4 py-2 hover:opacity-90 disabled:opacity-50"
+                >
+                  Iniciar traducción
+                </button>
+              ) : (
+                <button
+                  onClick={stopTranslation}
+                  className="rounded-xl bg-neutral-800 border border-neutral-700 px-4 py-2 hover:bg-neutral-700"
+                >
+                  Parar traducción
+                </button>
+              )}
+            </div>
+
             <div className="text-sm text-neutral-300">
-              Audio P2P (WebRTC):{" "}
-              <span className="font-medium">{audioStatus === "connected" ? "OK" : audioStatus}</span>
-              <p className="mt-2 text-xs text-neutral-400">
-                ICE: {iceState} · Conn: {connState} · Remote: {remoteReady ? "sí" : "no"}
-              </p>
+              Traducción: <span className="font-medium">{trStatus}</span>{" "}
+              <span className="text-neutral-500">
+                ({langLabel(peerLangEffective)} → {langLabel(myLangEffective)})
+              </span>
+            </div>
+          </div>
+
+          {/* Errors */}
+          {audioStatus === "error" && <div className="text-sm text-red-300 break-words">{audioError}</div>}
+          {trStatus === "error" && <div className="text-sm text-red-300 break-words">{trError}</div>}
+
+          {/* Settings */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+            <div>
+              <label className="block text-xs text-neutral-400 mb-1">Tu nombre</label>
+              <input
+                value={myNameDraft}
+                onChange={(e) => setMyNameDraft(e.target.value)}
+                placeholder="Tu nombre"
+                className="w-full rounded-xl bg-neutral-900 border border-neutral-800 p-3"
+              />
             </div>
 
             <button
-              onClick={startAudio}
-              disabled={audioStatus !== "idle"}
-              className="rounded-xl bg-white text-neutral-950 font-medium px-4 py-2 hover:opacity-90 disabled:opacity-50"
+              onClick={saveMyName}
+              className="rounded-xl bg-neutral-800 border border-neutral-700 px-4 py-3 hover:bg-neutral-700"
             >
-              {audioLabel}
+              Guardar nombre
             </button>
+
+            <div>
+              <label className="block text-xs text-neutral-400 mb-1">Tu idioma (cambia antes de traducir)</label>
+              <select
+                value={myLangEffective}
+                onChange={(e) => onChangeMyLang(e.target.value)}
+                disabled={trStatus !== "idle"}
+                className="w-full rounded-xl bg-neutral-900 border border-neutral-800 p-3 disabled:opacity-60"
+              >
+                {LANGS.map((l) => (
+                  <option key={l.code} value={l.code}>
+                    {l.label}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
-          {audioStatus === "error" && <p className="mt-3 text-sm text-red-300 break-words">{audioError}</p>}
-
+          {/* Audio elements (hidden but needed) */}
           <audio ref={remoteAudioRef} autoPlay playsInline />
+          <audio ref={trAudioRef} autoPlay playsInline />
+
           {needsRemotePlay && (
             <button
               onClick={enableRemoteAudio}
-              className="mt-3 rounded-xl bg-neutral-800 border border-neutral-700 px-4 py-2 hover:bg-neutral-700"
+              className="mt-2 rounded-xl bg-neutral-800 border border-neutral-700 px-4 py-2 hover:bg-neutral-700"
             >
               Activar sonido
             </button>
           )}
 
-          <p className="mt-3 text-xs text-neutral-400">
-            Consejo: usa auriculares para evitar eco. Si no oyes nada, pulsa “Iniciar audio” en ambos.
-          </p>
-        </div>
-
-        {/* Traducción */}
-        <div className="mt-4 rounded-xl bg-neutral-950 border border-neutral-800 p-4">
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-sm text-neutral-300">
-              Traducción (OpenAI Realtime):{" "}
-              <span className="font-medium">{trStatus}</span>
-              <p className="mt-2 text-xs text-neutral-400">
-                Traduce <span className="font-medium">{peer}</span> → <span className="font-medium">{my}</span>
-              </p>
-            </div>
-
-            {trStatus === "idle" ? (
-              <button
-                onClick={startTranslation}
-                disabled={!remoteReady}
-                className="rounded-xl bg-white text-neutral-950 font-medium px-4 py-2 hover:opacity-90 disabled:opacity-50"
-              >
-                Iniciar traducción
-              </button>
-            ) : (
-              <button
-                onClick={stopTranslation}
-                className="rounded-xl bg-neutral-800 border border-neutral-700 px-4 py-2 hover:bg-neutral-700"
-              >
-                Parar
-              </button>
-            )}
-          </div>
-
-          {trStatus === "error" && <p className="mt-3 text-sm text-red-300 break-words">{trError}</p>}
-
-          {/* Audio traducido (del modelo) */}
-          <audio ref={trAudioRef} autoPlay playsInline />
           {needsTrPlay && (
             <button
               onClick={enableTranslatedAudio}
-              className="mt-3 rounded-xl bg-neutral-800 border border-neutral-700 px-4 py-2 hover:bg-neutral-700"
+              className="mt-2 rounded-xl bg-neutral-800 border border-neutral-700 px-4 py-2 hover:bg-neutral-700"
             >
               Activar sonido traducido
             </button>
           )}
 
-          <p className="mt-3 text-xs text-neutral-400">
-            Nota: cuando entra traducción, se mutea el audio original para que solo oigas el traducido.
-          </p>
+          <div className="text-xs text-neutral-500">
+            WS: {SIGNAL_URL} · serverId: {serverId} · clientId: {clientId} · role: {myRole}
+          </div>
         </div>
-
-        {/* Invitación */}
-        <div className="mt-6 rounded-xl bg-neutral-950 border border-neutral-800 p-4">
-          <p className="text-sm text-neutral-300">Enlace para invitar:</p>
-          <p className="mt-2 break-all text-sm">{invitePath}</p>
-          <button
-            onClick={copyInvite}
-            className="mt-3 rounded-xl bg-neutral-800 border border-neutral-700 px-4 py-2 hover:bg-neutral-700"
-          >
-            Copiar enlace completo
-          </button>
-        </div>
-        <p className="mt-2 text-xs text-neutral-400">
-        WS: {SIGNAL_URL} · serverId: {serverId} · clientId: {clientId}
-        </p>
-
-
-        <div className="mt-6">
-          <a href="/" className="text-sm text-neutral-300 underline">
-            Volver
-          </a>
-        </div>
-      </div>
+      </footer>
     </main>
   );
 }

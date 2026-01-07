@@ -21,8 +21,13 @@ function randomRoomCode() {
 
 export default function Home() {
   const router = useRouter();
+
+  const [myName, setMyName] = useState("");
+  const [peerName, setPeerName] = useState("");
+
   const [myLang, setMyLang] = useState("es");
   const [peerLang, setPeerLang] = useState("hu");
+
   const [joinCode, setJoinCode] = useState("");
 
   const shareText = useMemo(() => {
@@ -31,13 +36,26 @@ export default function Home() {
 
   const createRoom = () => {
     const code = randomRoomCode();
-    router.push(`/room/${code}?my=${encodeURIComponent(myLang)}&peer=${encodeURIComponent(peerLang)}`);
+
+    // El creador SI define idiomas iniciales + nombre esperado
+    const qs = new URLSearchParams();
+    qs.set("init", "1");
+    qs.set("my", myLang);
+    qs.set("peer", peerLang);
+    if (myName.trim()) qs.set("name", myName.trim());
+    if (peerName.trim()) qs.set("peerName", peerName.trim());
+
+    router.push(`/room/${code}?${qs.toString()}`);
   };
 
   const joinRoom = () => {
     const code = joinCode.trim().toUpperCase();
     if (!code) return;
-    router.push(`/room/${code}?my=${encodeURIComponent(myLang)}&peer=${encodeURIComponent(peerLang)}`);
+
+    // ✅ Al unirte por código, NO mandamos idiomas (los manda la sala).
+    const qs = new URLSearchParams();
+    if (myName.trim()) qs.set("name", myName.trim());
+    router.push(`/room/${code}${qs.toString() ? `?${qs.toString()}` : ""}`);
   };
 
   return (
@@ -45,12 +63,33 @@ export default function Home() {
       <div className="w-full max-w-xl rounded-2xl bg-neutral-900/60 border border-neutral-800 p-6 shadow">
         <h1 className="text-2xl font-semibold">Traductor instantáneo (MVP)</h1>
         <p className="text-neutral-300 mt-2">
-          Prueba sin login. Crea una sala, comparte el código y entra desde otro móvil.
+          Crea una sala, comparte el enlace o código. Si entras por código, los idiomas los define el creador (y podrás
+          cambiar el tuyo dentro).
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-6">
+          <div className="sm:col-span-2">
+            <label className="block text-sm text-neutral-300 mb-2">Tu nombre</label>
+            <input
+              value={myName}
+              onChange={(e) => setMyName(e.target.value)}
+              placeholder="Ej. Fernando Madinabeitia"
+              className="w-full rounded-xl bg-neutral-950 border border-neutral-800 p-3"
+            />
+          </div>
+
+          <div className="sm:col-span-2">
+            <label className="block text-sm text-neutral-300 mb-2">Nombre de la otra persona (opcional)</label>
+            <input
+              value={peerName}
+              onChange={(e) => setPeerName(e.target.value)}
+              placeholder="Ej. Attila Kovács"
+              className="w-full rounded-xl bg-neutral-950 border border-neutral-800 p-3"
+            />
+          </div>
+
           <div>
-            <label className="block text-sm text-neutral-300 mb-2">Mi idioma</label>
+            <label className="block text-sm text-neutral-300 mb-2">Mi idioma (creador)</label>
             <select
               value={myLang}
               onChange={(e) => setMyLang(e.target.value)}
@@ -65,7 +104,7 @@ export default function Home() {
           </div>
 
           <div>
-            <label className="block text-sm text-neutral-300 mb-2">Idioma de la otra persona</label>
+            <label className="block text-sm text-neutral-300 mb-2">Idioma de la otra persona (creador)</label>
             <select
               value={peerLang}
               onChange={(e) => setPeerLang(e.target.value)}

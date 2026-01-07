@@ -6,33 +6,124 @@ export default {
       return new Response("OK");
     }
 
-    // ✅ No obligues room en query: usa global
+    // room siempre por query, fallback por si pruebas a mano
     const room = url.searchParams.get("room") ?? "global";
 
     const id = env.ROOMS.idFromName(room);
     const stub = env.ROOMS.get(id);
-    return stub.fetch(request); // ✅ reenviar request original
+    return stub.fetch(request);
   },
 };
 
+const EMPTY_ROOM_STATE = {
+  creator: { name: "", lang: "" },
+  guest: { name: "", lang: "" },
+};
 
 export class RoomDO {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+
     this.sockets = new Map(); // clientId -> WebSocket
+    this.meta = new Map(); // clientId -> { role: "creator" | "guest" }
+  }
+
+  roleForNextConnection() {
+    // Solo 2 personas: 1º creator, 2º guest
+    return this.sockets.size === 0 ? "creator" : "guest";
   }
 
   broadcast(obj, exceptId = null) {
     const msg = JSON.stringify(obj);
     for (const [id, ws] of this.sockets.entries()) {
       if (exceptId && id === exceptId) continue;
-      try { ws.send(msg); } catch {}
+      try {
+        ws.send(msg);
+      } catch {}
     }
   }
 
   broadcastPeers() {
     this.broadcast({ type: "peers", count: this.sockets.size });
+  }
+
+  async getRoomState() {
+    const s = await this.state.storage.get("roomState");
+    return s ?? EMPTY_ROOM_STATE;
+  }
+
+  async setRoomState(nextState) {
+    await this.state.storage.put("roomState", nextState);
+  }
+
+  async broadcastRoomState() {
+    const roomState = await this.getRoomState();
+    this.broadcast({ type: "room_state", roomState });
+  }
+
+  async handleMessage(clientId, role, data) {
+    // Compat con tu protocolo actual
+    if (data?.type === "join") {
+      this.broadcastPeers();
+      return;
+    }
+
+    // Inicialización SOLO por creator. Si ya hay idiomas guardados, no pisa nada.
+    if (data?.type === "init_room") {
+      if (role !== "creator") return;
+
+      const incoming = data?.payload ?? {};
+      const current = await this.getRoomState();
+
+      const alreadyInit = Boolean(current.creator.lang && current.guest.lang);
+
+      if (!alreadyInit) {
+        const nextState = {
+          creator: {
+            name: (incoming.creator?.name ?? "").trim(),
+            lang: (incoming.creator?.lang ?? "").trim(),
+          },
+          guest: {
+            name: (incoming.guest?.name ?? "").trim(),
+            lang: (incoming.guest?.lang ?? "").trim(),
+          },
+        };
+
+        await this.setRoomState(nextState);
+        await this.broadcastRoomState();
+      } else {
+        // si ya está init, igualmente mandamos estado al creador por si entra tarde
+        await this.broadcastRoomState();
+      }
+      return;
+    }
+
+    // Cada usuario puede cambiar SOLO su nombre/idioma
+    if (data?.type === "profile") {
+      const patch = data?.payload ?? {};
+      const current = await this.getRoomState();
+
+      const nextState = structuredClone(current);
+
+      if (role === "creator") {
+        if (typeof patch.name === "string") nextState.creator.name = patch.name.trim();
+        if (typeof patch.lang === "string") nextState.creator.lang = patch.lang.trim();
+      } else {
+        if (typeof patch.name === "string") nextState.guest.name = patch.name.trim();
+        if (typeof patch.lang === "string") nextState.guest.lang = patch.lang.trim();
+      }
+
+      await this.setRoomState(nextState);
+      await this.broadcastRoomState();
+      return;
+    }
+
+    // Señalización WebRTC (igual que ahora)
+    if (data?.type === "signal") {
+      this.broadcast({ type: "signal", payload: data.payload }, clientId);
+      return;
+    }
   }
 
   async fetch(request) {
@@ -46,33 +137,34 @@ export class RoomDO {
 
     const clientId = crypto.randomUUID();
     const serverId = "cf-do";
+    const role = this.roleForNextConnection();
 
     server.accept();
-    this.sockets.set(clientId, server);
 
-    // hello + peers
-    server.send(JSON.stringify({ type: "hello", serverId, clientId }));
+    this.sockets.set(clientId, server);
+    this.meta.set(clientId, { role });
+
+    const roomState = await this.getRoomState();
+
+    // hello + peers + roomState
+    server.send(JSON.stringify({ type: "hello", serverId, clientId, role, roomState }));
     this.broadcastPeers();
 
     server.addEventListener("message", (ev) => {
       let data;
-      try { data = JSON.parse(ev.data); } catch { return; }
-
-      // Compat con tu protocolo actual
-      if (data?.type === "join") {
-        // ya estamos en la sala por DO; solo reemitimos peers por si acaso
-        this.broadcastPeers();
+      try {
+        data = JSON.parse(ev.data);
+      } catch {
         return;
       }
 
-      if (data?.type === "signal") {
-        // reenvía a todos menos al emisor
-        this.broadcast({ type: "signal", payload: data.payload }, clientId);
-      }
+      // IMPORTANT: no hacemos async directamente aquí (Cloudflare ok, pero mejor aislado)
+      this.handleMessage(clientId, role, data).catch(() => {});
     });
 
     const onClose = () => {
       this.sockets.delete(clientId);
+      this.meta.delete(clientId);
       this.broadcastPeers();
     };
     server.addEventListener("close", onClose);
