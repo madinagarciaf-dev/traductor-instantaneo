@@ -12,8 +12,8 @@ export async function GET(req: Request) {
   }
 
   const { searchParams } = new URL(req.url);
-  const my = searchParams.get("my") ?? "es";     // idioma que QUIERE oír este usuario
-  const peer = searchParams.get("peer") ?? "hu"; // idioma que HABLA la otra persona
+  const my = searchParams.get("my") ?? "es";      // idioma que QUIERE oír este usuario
+  const peer = searchParams.get("peer") ?? "hu";  // idioma que HABLA la otra persona
   const voice = searchParams.get("voice") ?? "alloy";
 
   const body = {
@@ -21,7 +21,19 @@ export async function GET(req: Request) {
     session: {
       type: "realtime",
       model: "gpt-realtime",
-      audio: { output: { voice } },
+      audio: {
+        input: {
+          turn_detection: {
+            type: "server_vad",
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 200,
+            create_response: true,
+            interrupt_response: true,
+          },
+        },
+        output: { voice },
+      },
       instructions: `Eres un intérprete simultáneo. El hablante habla en ${peer}. Responde SIEMPRE en ${my}. Traduce fielmente. No añadas comentarios.`,
     },
   };
@@ -43,6 +55,5 @@ export async function GET(req: Request) {
     );
   }
 
-  // Devuelve JSON con { value: "ek_...", expires_at, session: {...} }
   return NextResponse.json(data);
 }

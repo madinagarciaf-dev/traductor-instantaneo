@@ -44,11 +44,13 @@ function ParticipantTile({
   title,
   name,
   speaking,
+  translatorSpeaking,
   waitingText,
 }: {
   title: string;
   name: string;
   speaking: boolean;
+  translatorSpeaking?: boolean;
   waitingText?: string;
 }) {
   const initials = initialsOf(name);
@@ -57,14 +59,44 @@ function ParticipantTile({
     <div className="rounded-3xl bg-neutral-900/60 border border-neutral-800 p-6 shadow flex flex-col items-center justify-center min-h-[320px]">
       <div className="text-sm text-neutral-400">{title}</div>
 
-      <div
-        className={[
-          "mt-6 h-44 w-44 rounded-full flex items-center justify-center text-5xl font-semibold select-none",
-          "bg-neutral-950 border border-neutral-800",
-          speaking ? "ring-4 ring-blue-400 shadow-[0_0_40px_rgba(59,130,246,0.45)] animate-pulse" : "",
-        ].join(" ")}
-      >
-        {initials}
+      {/* Avatar + rings */}
+      <div className="mt-6 relative h-44 w-44">
+        {/* Aro dorado/crema (traductor hablando) -> por fuera */}
+        {translatorSpeaking && (
+          <div
+            className={[
+              "absolute -inset-2 rounded-full pointer-events-none",
+              "ring-2 ring-amber-200",
+              "shadow-[0_0_35px_rgba(253,230,138,0.25)]",
+              "animate-pulse",
+              "z-20",
+            ].join(" ")}
+          />
+        )}
+
+        {/* Aro azul (hablante detectado por VAD) */}
+        {speaking && (
+          <div
+            className={[
+              "absolute inset-0 rounded-full pointer-events-none",
+              "ring-4 ring-blue-400",
+              "shadow-[0_0_40px_rgba(59,130,246,0.45)]",
+              "animate-pulse",
+              "z-10",
+            ].join(" ")}
+          />
+        )}
+
+        {/* Círculo base */}
+        <div
+          className={[
+            "h-44 w-44 rounded-full flex items-center justify-center text-5xl font-semibold select-none",
+            "bg-neutral-950 border border-neutral-800",
+            "relative z-0",
+          ].join(" ")}
+        >
+          {initials}
+        </div>
       </div>
 
       <div className="mt-4 text-base text-neutral-200">{name || "Sin nombre"}</div>
@@ -77,6 +109,7 @@ function ParticipantTile({
     </div>
   );
 }
+
 
 export default function RoomPage({ params }: { params: Promise<{ code: string }> }) {
   const { code } = use(params);
@@ -102,6 +135,8 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
   // Drafts editables (tu usuario)
   const [myNameDraft, setMyNameDraft] = useState<string>(qsName);
   const [myLangDraft, setMyLangDraft] = useState<string>("");
+  const myLangTouchedRef = useRef(false);
+
 
   // Audio P2P
   const [audioStatus, setAudioStatus] = useState<"idle" | "getting-mic" | "calling" | "connected" | "error">("idle");
@@ -143,6 +178,16 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
   // VAD cleanup
   const vadCleanupLocalRef = useRef<null | (() => void)>(null);
   const vadCleanupRemoteRef = useRef<null | (() => void)>(null);
+  const [translatorSpeaking, setTranslatorSpeaking] = useState(false);
+  const vadCleanupTrRef = useRef<null | (() => void)>(null);
+  
+  // ✅ AÑADE ESTO AQUÍ (una sola vez)
+  useEffect(() => {
+    return () => {
+      try { vadCleanupTrRef.current?.(); } catch {}
+      vadCleanupTrRef.current = null;
+    };
+  }, []);
 
   const didInitRoomRef = useRef(false);
 
@@ -174,7 +219,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     sendWs({ type: "signal", payload });
   }
 
-  function setupVAD(stream: MediaStream, setSpeaking: (v: boolean) => void) {
+  function setupVAD(stream: MediaStream, setSpeaking: (v: boolean) => void, threshold = 0.03) {
     try {
       const AudioCtxCtor = window.AudioContext || ((window as any).webkitAudioContext as typeof AudioContext);
       const ctx = new AudioCtxCtor();
@@ -194,26 +239,18 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
           const v = (data[i] - 128) / 128;
           sum += v * v;
         }
-        const rms = Math.sqrt(sum / data.length); // 0..1 aprox
-        setSpeaking(rms > 0.03);
+        const rms = Math.sqrt(sum / data.length);
+        setSpeaking(rms > threshold);
         raf = requestAnimationFrame(tick);
       };
 
       tick();
 
       return () => {
-        try {
-          cancelAnimationFrame(raf);
-        } catch {}
-        try {
-          src.disconnect();
-        } catch {}
-        try {
-          analyser.disconnect();
-        } catch {}
-        try {
-          ctx.close();
-        } catch {}
+        try { cancelAnimationFrame(raf); } catch {}
+        try { src.disconnect(); } catch {}
+        try { analyser.disconnect(); } catch {}
+        try { ctx.close(); } catch {}
       };
     } catch {
       return () => {};
@@ -224,7 +261,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
   const me = myRole === "creator" ? roomState?.creator : myRole === "guest" ? roomState?.guest : null;
   const other = myRole === "creator" ? roomState?.guest : myRole === "guest" ? roomState?.creator : null;
 
-  const myLangEffective = (me?.lang || myLangDraft || qsMy).trim();
+  const myLangEffective = (myLangDraft || me?.lang || qsMy).trim();
   const peerLangEffective = (other?.lang || qsPeer).trim();
 
   const myNameEffective = (me?.name || myNameDraft || "Yo").trim() || "Yo";
@@ -265,7 +302,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
           // set draft de idioma si aún no tenemos
           const myLangFromRoom =
             role === "creator" ? msg.roomState.creator?.lang : role === "guest" ? msg.roomState.guest?.lang : "";
-          if (!myLangDraft && myLangFromRoom) setMyLangDraft(myLangFromRoom);
+          if (!myLangTouchedRef.current && myLangFromRoom) setMyLangDraft(myLangFromRoom);
         }
 
         // INIT de sala: solo lo intenta el creator (el DO ignora si ya está init)
@@ -309,7 +346,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
         // si todavía no has tocado el selector de idioma, hidrata draft
         const nextMyLang =
           myRole === "creator" ? msg.roomState.creator?.lang : myRole === "guest" ? msg.roomState.guest?.lang : "";
-        if (nextMyLang && !myLangDraft) setMyLangDraft(nextMyLang);
+        if (nextMyLang && !myLangTouchedRef.current) setMyLangDraft(nextMyLang);
 
         // hidrata nombre draft si viene vacío
         const nextMyName =
@@ -498,6 +535,9 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
       }
 
       const iAmCaller = myLangEffective < peerLangEffective; // determinista
+      if (!iAmCaller && (remoteDescSetRef.current || pc.connectionState === "connected")) {
+        sendSignal({ kind: "need_offer" });
+      }
       setAudioStatus("calling");
 
       if (connectTimeoutRef.current) {
@@ -537,6 +577,16 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
 
   async function handleSignal(payload: any) {
     const pc = await ensurePeerConnection();
+
+    if (payload?.kind === "need_offer") {
+      const iAmCaller = myLangEffective < peerLangEffective;
+      if (iAmCaller) {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        sendSignal({ kind: "offer", sdp: offer });
+      }
+      return;
+    }
 
     if (payload?.kind === "offer") {
       await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
@@ -587,7 +637,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
 
       const remoteStream = remoteAudioRef.current?.srcObject as MediaStream | null;
       if (!remoteStream) throw new Error("Aún no hay audio remoto. Conecta el audio P2P primero.");
-
+      setTranslatorSpeaking(false);
       setTrStatus("connecting");
 
       const tokenRes = await fetch(
@@ -628,6 +678,10 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
         el.muted = false;
         el.volume = 1;
 
+        // ✅ aro dorado cuando el traductor habla
+        try { vadCleanupTrRef.current?.(); } catch {}
+        vadCleanupTrRef.current = setupVAD(e.streams[0], setTranslatorSpeaking, 0.02);
+
         if (remoteAudioRef.current) remoteAudioRef.current.muted = true;
 
         try {
@@ -638,6 +692,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
           setNeedsTrPlay(true);
         }
       };
+
 
       const dc = oaiPc.createDataChannel("oai-events");
       dc.addEventListener("message", (ev) => {
@@ -695,6 +750,12 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     } catch {}
     trSourceRef.current = null;
     trDestRef.current = null;
+    try { 
+      vadCleanupTrRef.current?.(); 
+    } catch {}
+    vadCleanupTrRef.current = null;
+    setTranslatorSpeaking(false);
+
 
     if (remoteAudioRef.current) remoteAudioRef.current.muted = false;
 
@@ -721,12 +782,14 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
   };
 
   const onChangeMyLang = (v: string) => {
+    myLangTouchedRef.current = true;  // ✅ IMPORTANTE
     setMyLangDraft(v);
-    // Solo permitimos cambiar idioma si NO hay traducción activa (como pediste)
+
     if (trStatus === "idle") {
       sendWs({ type: "profile", payload: { lang: v } });
     }
   };
+
 
   const audioLabel =
     audioStatus === "idle"
@@ -761,10 +824,17 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
       {/* Tiles */}
       <section className="flex-1 p-6 flex items-center justify-center">
         <div className={`w-full max-w-5xl grid gap-6 ${peers >= 2 ? "grid-cols-1 md:grid-cols-2" : "grid-cols-1"}`}>
-          <ParticipantTile title="Yo" name={myNameEffective} speaking={meSpeaking} waitingText={waitingText} />
+          <ParticipantTile
+            title="Yo"
+            name={myNameEffective}
+            speaking={meSpeaking}
+            translatorSpeaking={false}
+            waitingText={waitingText}
+          />
+
 
           {peers >= 2 && (
-            <ParticipantTile title="Otro" name={otherNameEffective} speaking={otherSpeaking} />
+            <ParticipantTile title="Otro" name={otherNameEffective} speaking={otherSpeaking} translatorSpeaking={trStatus === "connected" && translatorSpeaking} />
           )}
         </div>
       </section>
@@ -777,7 +847,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
             <div className="flex gap-3">
               <button
                 onClick={startAudio}
-                disabled={audioStatus !== "idle"}
+                disabled={audioStatus === "getting-mic" || Boolean(localStreamRef.current)}
                 className="rounded-xl bg-white text-neutral-950 font-medium px-4 py-2 hover:opacity-90 disabled:opacity-50"
               >
                 {audioLabel}

@@ -73,7 +73,7 @@ export default function Home() {
             <input
               value={myName}
               onChange={(e) => setMyName(e.target.value)}
-              placeholder="Ej. Fernando Madinabeitia"
+              placeholder="Ej. Pepito Pérez"
               className="w-full rounded-xl bg-neutral-950 border border-neutral-800 p-3"
             />
           </div>
@@ -83,7 +83,7 @@ export default function Home() {
             <input
               value={peerName}
               onChange={(e) => setPeerName(e.target.value)}
-              placeholder="Ej. Attila Kovács"
+              placeholder="Ej. Menganito García"
               className="w-full rounded-xl bg-neutral-950 border border-neutral-800 p-3"
             />
           </div>
