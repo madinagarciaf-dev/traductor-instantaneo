@@ -1,3 +1,4 @@
+//src\app\room\[code]\page.tsx
 "use client";
 
 import { use, useEffect, useRef, useState } from "react";
@@ -163,6 +164,10 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const oaiPcRef = useRef<RTCPeerConnection | null>(null);
+  const oaiDcRef = useRef<RTCDataChannel | null>(null);
+  // Control backlog
+  const trInFlightRef = useRef(false);   // el traductor está generando/sonando
+  const trPendingRef = useRef(false);    // ha habido speech_stopped mientras estaba ocupado
   const trAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -628,6 +633,20 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
       console.warn("Still blocked:", e);
     }
   };
+  function oaiSend(evt: any) {
+    const dc = oaiDcRef.current;
+    if (!dc || dc.readyState !== "open") return;
+    dc.send(JSON.stringify(evt));
+  }
+
+  function requestTranslation() {
+    // pedimos una respuesta de audio (la sesión ya tiene instrucciones + voz)
+    trInFlightRef.current = true;
+    oaiSend({
+      type: "response.create",
+      response: { modalities: ["audio"] },
+    });
+  }
 
   // ======= Traducción OpenAI =======
   const startTranslation = async () => {
@@ -695,13 +714,52 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
 
 
       const dc = oaiPc.createDataChannel("oai-events");
+      oaiDcRef.current = dc;
+
       dc.addEventListener("message", (ev) => {
+        let evt: any;
         try {
-          console.log("OAI event:", JSON.parse(ev.data));
+          evt = JSON.parse(ev.data);
         } catch {
-          console.log("OAI raw:", ev.data);
+          return;
+        }
+
+        // Debug opcional
+        // console.log("OAI event:", evt);
+
+        // 1) Cuando el VAD detecta fin de habla: marcamos que hay algo pendiente
+        if (evt.type === "input_audio_buffer.speech_stopped") {
+          // Si el traductor está libre, pedimos respuesta ya.
+          if (!trInFlightRef.current) {
+            requestTranslation();
+          } else {
+            // Si está ocupado, lo dejamos en backlog
+            trPendingRef.current = true;
+          }
+          return;
+        }
+
+        // 2) Cuando termina una respuesta: si había backlog, pedimos otra
+        if (evt.type === "response.done") {
+          trInFlightRef.current = false;
+
+          if (trPendingRef.current) {
+            trPendingRef.current = false;
+            requestTranslation();
+          }
+          return;
+        }
+
+        // 3) Si OpenAI devuelve error
+        if (evt.type === "error") {
+          trInFlightRef.current = false;
+          trPendingRef.current = false;
+          setTrStatus("error");
+          setTrError(evt?.error?.message ?? "OpenAI realtime error");
+          return;
         }
       });
+
 
       oaiPc.addTrack(inputTrack, dest.stream);
 
@@ -740,6 +798,22 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
   };
 
   const stopTranslation = async () => {
+    // ✅ 1) Limpia flags de backlog (muy importante)
+    trInFlightRef.current = false;
+    trPendingRef.current = false;
+
+    // ✅ 2) (Opcional pero recomendado) Cancela cualquier respuesta en curso en OpenAI
+    try {
+      oaiSend({ type: "response.cancel" });
+    } catch {}
+
+    // ✅ 3) Ahora sí: cierra/limpia el DataChannel
+    try {
+      oaiDcRef.current?.close();
+    } catch {}
+    oaiDcRef.current = null;
+
+    // ---- lo que ya tenías, tal cual ----
     try {
       oaiPcRef.current?.close();
     } catch {}
@@ -750,12 +824,13 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     } catch {}
     trSourceRef.current = null;
     trDestRef.current = null;
-    try { 
-      vadCleanupTrRef.current?.(); 
+
+    try {
+      vadCleanupTrRef.current?.();
     } catch {}
     vadCleanupTrRef.current = null;
-    setTranslatorSpeaking(false);
 
+    setTranslatorSpeaking(false);
 
     if (remoteAudioRef.current) remoteAudioRef.current.muted = false;
 
@@ -763,6 +838,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     setTrError("");
     setTrStatus("idle");
   };
+
 
   const copyInvite = async () => {
     const full = `${window.location.origin}/room/${code}`;

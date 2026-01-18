@@ -1,3 +1,4 @@
+//src\app\api\realtime-token\route.ts
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -28,13 +29,22 @@ export async function GET(req: Request) {
             threshold: 0.5,
             prefix_padding_ms: 300,
             silence_duration_ms: 200,
-            create_response: true,
-            interrupt_response: true,
+            create_response: false,
+            interrupt_response: false,
           },
         },
         output: { voice },
       },
-      instructions: `Eres un intérprete simultáneo. El hablante habla en ${peer}. Responde SIEMPRE en ${my}. Traduce fielmente. No añadas comentarios.`,
+      instructions: `Eres un intérprete simultáneo.
+        El hablante habla en ${peer}.
+        Responde SIEMPRE en ${my}.
+        Traduce fielmente y en el mismo orden.
+
+        IMPORTANTE:
+        - Si recibes varias intervenciones antes de responder, traduce TODAS en orden.
+        - NO repitas contenido ya traducido en respuestas anteriores.
+        - No añadas comentarios, solo la traducción.
+        `.trim(),
     },
   };
 
