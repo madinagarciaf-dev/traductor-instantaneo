@@ -644,7 +644,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     trInFlightRef.current = true;
     oaiSend({
       type: "response.create",
-      response: { modalities: ["audio"] },
+      response: { output_modalities: ["audio"] },
     });
   }
 
