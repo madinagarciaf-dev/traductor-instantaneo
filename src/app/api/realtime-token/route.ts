@@ -13,24 +13,23 @@ export async function GET(req: Request) {
   }
 
   const { searchParams } = new URL(req.url);
-  const my = searchParams.get("my") ?? "es";      // idioma que QUIERE oír este usuario
-  const peer = searchParams.get("peer") ?? "hu";  // idioma que HABLA la otra persona
+  const my = searchParams.get("my") ?? "es";
+  const peer = searchParams.get("peer") ?? "hu";
   const voice = searchParams.get("voice") ?? "alloy";
 
   const body = {
-    // anchor para que no expire inmediatamente si hay lag
+    // Configuración estándar que te funcionaba
     expires_after: { anchor: "created_at", seconds: 600 },
     session: {
-      // ✅ CAMBIO 1: Usamos el modelo específico, no el alias genérico
-      model: "gpt-4o-realtime-preview-2024-12-17", 
+      type: "realtime",        // IMPORTANTE: Lo había quitado y es obligatorio
+      model: "gpt-4o-realtime-preview-2024-12-17", // Usamos la versión estable con VAD
       
-      // ✅ CAMBIO 2: Exigimos audio Y texto (necesario para eventos de transcripción)
-      modalities: ["audio", "text"],
-
-      // ✅ CAMBIO 3: Activamos Whisper AQUÍ (Backend) para que sea nativo
+      // 👇 LO ÚNICO NUEVO QUE AÑADIMOS 👇
+      modalities: ["audio", "text"], 
       input_audio_transcription: {
-        model: "whisper-1",
+        model: "whisper-1", 
       },
+      // 👆 FIN DE LO NUEVO 👆
 
       audio: {
         input: {
@@ -39,8 +38,8 @@ export async function GET(req: Request) {
             threshold: 0.5,
             prefix_padding_ms: 300,
             silence_duration_ms: 200,
-            create_response: false, // Importante: gestionamos la respuesta manualmente
-            interrupt_response: false, // Importante: gestionamos interrupción manualmente
+            create_response: false, // Manual
+            interrupt_response: false, // Manual
           },
         },
         output: { voice },
@@ -49,11 +48,6 @@ export async function GET(req: Request) {
         El hablante habla en ${peer}.
         Responde SIEMPRE en ${my}.
         Traduce fielmente y en el mismo orden.
-
-        IMPORTANTE:
-        - Si recibes varias intervenciones antes de responder, traduce TODAS en orden.
-        - NO repitas contenido ya traducido en respuestas anteriores.
-        - No añadas comentarios, solo la traducción.
         `.trim(),
     },
   };
@@ -68,7 +62,10 @@ export async function GET(req: Request) {
   });
 
   const data = await r.json();
+  
   if (!r.ok) {
+    // Esto nos dirá en la consola de Vercel por qué falla si vuelve a pasar
+    console.error("OpenAI Error:", data); 
     return NextResponse.json(
       { error: "OpenAI error", details: data },
       { status: r.status }
