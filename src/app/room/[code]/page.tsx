@@ -694,8 +694,12 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
         `/api/realtime-token?my=${encodeURIComponent(myLangEffective)}&peer=${encodeURIComponent(peerLangEffective)}&voice=alloy`
       );
       const tokenData = await tokenRes.json();
+      if (!tokenRes.ok) {
+        throw new Error(`/api/realtime-token ${tokenRes.status}: ${JSON.stringify(tokenData)}`);
+      }
       const EPHEMERAL_KEY = tokenData?.value;
-      if (!EPHEMERAL_KEY) throw new Error("No llegó client_secret (ek_...) desde /api/realtime-token");
+      if (!EPHEMERAL_KEY) throw new Error("No llegó value (ek_...) desde /api/realtime-token");
+
 
       const AudioCtxCtor = window.AudioContext || ((window as any).webkitAudioContext as typeof AudioContext);
       const ac = audioCtxRef.current ?? new AudioCtxCtor();
