@@ -1,4 +1,4 @@
-//src\app\api\realtime-token\route.ts
+// src/app/api/realtime-token/route.ts
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -18,10 +18,20 @@ export async function GET(req: Request) {
   const voice = searchParams.get("voice") ?? "alloy";
 
   const body = {
+    // anchor para que no expire inmediatamente si hay lag
     expires_after: { anchor: "created_at", seconds: 600 },
     session: {
-      type: "realtime",
-      model: "gpt-realtime",
+      // ✅ CAMBIO 1: Usamos el modelo específico, no el alias genérico
+      model: "gpt-4o-realtime-preview-2024-12-17", 
+      
+      // ✅ CAMBIO 2: Exigimos audio Y texto (necesario para eventos de transcripción)
+      modalities: ["audio", "text"],
+
+      // ✅ CAMBIO 3: Activamos Whisper AQUÍ (Backend) para que sea nativo
+      input_audio_transcription: {
+        model: "whisper-1",
+      },
+
       audio: {
         input: {
           turn_detection: {
@@ -29,8 +39,8 @@ export async function GET(req: Request) {
             threshold: 0.5,
             prefix_padding_ms: 300,
             silence_duration_ms: 200,
-            create_response: false,
-            interrupt_response: false,
+            create_response: false, // Importante: gestionamos la respuesta manualmente
+            interrupt_response: false, // Importante: gestionamos interrupción manualmente
           },
         },
         output: { voice },

@@ -746,23 +746,6 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
 
       const dc = oaiPc.createDataChannel("oai-events");
       oaiDcRef.current = dc;
-
-      // 👇👇 BLOQUE NUEVO PARA ACTIVAR TRANSCRIPCIÓN 👇👇
-      dc.addEventListener("open", () => {
-        // En cuanto se abre el canal, le decimos: "Usa Whisper para transcribir lo que escuches"
-        const configMsg = {
-          type: "session.update",
-          session: {
-            modalities: ["text", "audio"], // Aseguramos que maneje texto y audio
-            input_audio_transcription: {
-              model: "whisper-1", // ✅ ESTO ES LA CLAVE QUE FALTABA
-            },
-          },
-        };
-        dc.send(JSON.stringify(configMsg));
-      });
-      // 👆👆 FIN DEL BLOQUE NUEVO 👆👆
-
       dc.addEventListener("message", (ev) => {
         let evt: any;
         try {
