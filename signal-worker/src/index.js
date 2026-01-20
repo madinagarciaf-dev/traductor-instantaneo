@@ -31,8 +31,21 @@ export class RoomDO {
   }
 
   roleForNextConnection() {
-    // Solo 2 personas: 1º creator, 2º guest
-    return this.sockets.size === 0 ? "creator" : "guest";
+    // 1. Miramos qué roles están ocupados AHORA MISMO en memoria
+    let creatorExists = false;
+    for (const m of this.meta.values()) {
+      if (m.role === "creator") {
+        creatorExists = true;
+        break;
+      }
+    }
+
+    // 2. Si no hay creador conectado (porque es nuevo O porque acaba de refrescar),
+    // el que entra recupera el trono de 'creator'.
+    if (!creatorExists) return "creator";
+
+    // 3. Si ya hay creador, eres guest
+    return "guest";
   }
 
   broadcast(obj, exceptId = null) {
