@@ -331,13 +331,9 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
           sendWs({ type: "profile", payload: { name: initState.creator.name, lang: initState.creator.lang } });
         }
 
-        // Perfil del guest: manda su nombre SOLO si el servidor está vacío (evita pisar si refrescas)
+        // Perfil del guest: manda su nombre (no pisa idioma)
         if (role === "guest") {
-          const currentName = msg.roomState?.guest?.name;
-          // Solo enviamos si NO hay nombre guardado en el servidor para el guest
-          if (!currentName && qsName?.trim()) {
-            sendWs({ type: "profile", payload: { name: qsName.trim() } });
-          }
+          if (qsName?.trim()) sendWs({ type: "profile", payload: { name: qsName.trim() } });
         }
 
         return;
