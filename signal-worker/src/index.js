@@ -138,6 +138,13 @@ export class RoomDO {
       this.broadcast({ type: "signal", payload: data.payload }, clientId);
       return;
     }
+    // NUEVO: Rebotar transcripciones (Espejo invertido)
+    if (data?.type === "transcript") {
+      // Se lo enviamos a todos (el front filtrará, o simplemente al peer)
+      // Usamos broadcast excluyendo al remitente para que no se duplique
+      this.broadcast({ type: "transcript", payload: data.payload }, clientId);
+      return;
+    }
   }
 
   async fetch(request) {

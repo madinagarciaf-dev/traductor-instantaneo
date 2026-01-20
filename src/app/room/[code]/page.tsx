@@ -27,8 +27,16 @@ type WsMsg =
   | { type: "room_state"; roomState: RoomState }
   | { type: "init_room"; payload: RoomState }
   | { type: "profile"; payload: { name?: string; lang?: string } }
-  | { type: "signal"; payload: any };
+  | { type: "signal"; payload: any }
+  | { type: "transcript"; payload: { text: string; timestamp: number } };
 
+type TranscriptItem = {
+  id: string;
+  speaker: "me" | "peer";
+  timestamp: number;
+  original: string;   // Lo que se dijo realmente (ej: Hungarian)
+  translated: string; // Lo que se escuchó (ej: Español)
+};  
 function initialsOf(name: string) {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "?";
@@ -184,6 +192,10 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
   const vadCleanupLocalRef = useRef<null | (() => void)>(null);
   const vadCleanupRemoteRef = useRef<null | (() => void)>(null);
   const [translatorSpeaking, setTranslatorSpeaking] = useState(false);
+  //Estados para transcripción
+  const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
+  const [showTranscript, setShowTranscript] = useState(false);
+  const [transcriptTab, setTranscriptTab] = useState<"translated" | "original">("translated");
   const vadCleanupTrRef = useRef<null | (() => void)>(null);
   
   // ✅ AÑADE ESTO AQUÍ (una sola vez)
@@ -364,9 +376,24 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
 
         return;
       }
-
+      
       if (msg.type === "signal") {
         await handleSignal(msg.payload);
+      }
+
+      // NUEVO: Recibir mi propia transcripción (que generó el otro)
+      if (msg.type === "transcript") {
+        const { text, timestamp } = msg.payload;
+        setTranscripts((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            speaker: "me",
+            timestamp: timestamp || Date.now(),
+            original: text,
+            translated: text, // Para mí, lo original y traducido es igual
+          },
+        ]);
       }
     };
 
@@ -731,6 +758,48 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
         // Debug opcional
         // console.log("OAI event:", evt);
 
+        // NUEVO: Capturar transcripción del OTRO (input)
+        if (evt.type === "conversation.item.input_audio_transcription.completed") {
+          const text = evt.transcript?.trim();
+          if (text) {
+             // 1. Guardar en mi lista como "peer" (original)
+             const newItem: TranscriptItem = {
+               id: evt.item_id || crypto.randomUUID(),
+               speaker: "peer",
+               timestamp: Date.now(),
+               original: text,
+               translated: "...", // Esperando traducción...
+             };
+             
+             setTranscripts(prev => [...prev, newItem]);
+
+             // 2. Enviar al otro usuario (Espejo) para que sepa qué dijo
+             sendWs({ 
+               type: "transcript", 
+               payload: { text, timestamp: newItem.timestamp } 
+             });
+          }
+        }
+
+        // NUEVO: Capturar la traducción (response)
+        if (evt.type === "response.audio_transcript.done") {
+          const text = evt.transcript?.trim();
+          if (text) {
+             // Actualizamos el último mensaje del peer con la traducción
+             setTranscripts(prev => {
+               const copy = [...prev];
+               // Buscamos el último mensaje del peer que no tenga traducción
+               // O simplemente el último mensaje del peer (simplificación eficaz)
+               const lastPeerIndex = copy.findLastIndex(t => t.speaker === "peer");
+               if (lastPeerIndex !== -1) {
+                 copy[lastPeerIndex] = { ...copy[lastPeerIndex], translated: text };
+               }
+               return copy;
+             });
+          }
+        }
+        
+
         // 1) Cuando el VAD detecta fin de habla: marcamos que hay algo pendiente
         if (evt.type === "input_audio_buffer.speech_stopped") {
           // Si el traductor está libre, pedimos respuesta ya.
@@ -882,8 +951,8 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
       ? "Audio conectado ✅"
       : "Error de audio";
 
-  return (
-    <main className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col">
+return (
+    <main className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col relative overflow-x-hidden">
       {/* Top bar */}
       <header className="px-6 py-4 border-b border-neutral-800 flex items-center justify-between gap-4">
         <div>
@@ -912,19 +981,23 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
             waitingText={waitingText}
           />
 
-
           {peers >= 2 && (
-            <ParticipantTile title="Otro" name={otherNameEffective} speaking={otherSpeaking} translatorSpeaking={trStatus === "connected" && translatorSpeaking} />
+            <ParticipantTile 
+              title="Otro" 
+              name={otherNameEffective} 
+              speaking={otherSpeaking} 
+              translatorSpeaking={trStatus === "connected" && translatorSpeaking} 
+            />
           )}
         </div>
       </section>
 
       {/* Controls */}
-      <footer className="px-6 py-5 border-t border-neutral-800 bg-neutral-950/60">
+      <footer className="px-6 py-5 border-t border-neutral-800 bg-neutral-950/60 z-40 relative">
         <div className="flex flex-col gap-4">
           {/* Row buttons */}
           <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
-            <div className="flex gap-3">
+            <div className="flex gap-3 flex-wrap">
               <button
                 onClick={startAudio}
                 disabled={audioStatus === "getting-mic" || Boolean(localStreamRef.current)}
@@ -949,6 +1022,18 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
                   Parar traducción
                 </button>
               )}
+
+              {/* ✅ BOTÓN NUEVO: Ver Texto */}
+              <button
+                onClick={() => setShowTranscript(!showTranscript)}
+                className={`rounded-xl border px-4 py-2 font-medium transition-colors ${
+                  showTranscript 
+                    ? "bg-white text-neutral-950 border-white" 
+                    : "bg-neutral-800 border-neutral-700 text-neutral-200 hover:bg-neutral-700"
+                }`}
+              >
+                {showTranscript ? "Ocultar Texto" : "Ver Texto"}
+              </button>
             </div>
 
             <div className="text-sm text-neutral-300">
@@ -1026,6 +1111,83 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
           </div>
         </div>
       </footer>
+
+      {/* ✅ PANEL LATERAL (Fuera del footer, dentro del main) */}
+      <div
+        className={`fixed top-0 right-0 h-full w-80 sm:w-96 bg-neutral-900 border-l border-neutral-800 shadow-2xl transform transition-transform duration-300 ease-in-out z-50 flex flex-col ${
+          showTranscript ? "translate-x-0" : "translate-x-full"
+        }`}
+      >
+        {/* Header del Panel */}
+        <div className="p-4 border-b border-neutral-800 flex items-center justify-between bg-neutral-950/50">
+          <h2 className="font-semibold text-lg">Transcripción</h2>
+          <button onClick={() => setShowTranscript(false)} className="text-neutral-400 hover:text-white">
+            ✕
+          </button>
+        </div>
+
+        {/* Pestañas */}
+        <div className="flex border-b border-neutral-800">
+          <button
+            onClick={() => setTranscriptTab("translated")}
+            className={`flex-1 py-3 text-sm font-medium transition-colors ${
+              transcriptTab === "translated"
+                ? "text-white border-b-2 border-blue-500 bg-neutral-800/50"
+                : "text-neutral-500 hover:text-neutral-300"
+            }`}
+          >
+            Mi Idioma
+          </button>
+          <button
+            onClick={() => setTranscriptTab("original")}
+            className={`flex-1 py-3 text-sm font-medium transition-colors ${
+              transcriptTab === "original"
+                ? "text-white border-b-2 border-blue-500 bg-neutral-800/50"
+                : "text-neutral-500 hover:text-neutral-300"
+            }`}
+          >
+            Original
+          </button>
+        </div>
+
+        {/* Lista de Mensajes */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-neutral-900">
+          {transcripts.length === 0 ? (
+            <div className="text-center text-neutral-500 mt-10 text-sm">
+              La conversación aparecerá aquí...
+            </div>
+          ) : (
+            transcripts.map((t) => {
+              const isMe = t.speaker === "me";
+              // Lógica de visualización según pestaña
+              let displayText = "";
+              if (transcriptTab === "original") {
+                displayText = t.original;
+              } else {
+                // En modo "Mi Idioma": Si soy yo, veo mi original. Si es el otro, veo su traducción.
+                displayText = isMe ? t.original : t.translated;
+              }
+
+              return (
+                <div key={t.id} className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}>
+                  <div
+                    className={`max-w-[85%] rounded-2xl px-4 py-2 text-sm ${
+                      isMe
+                        ? "bg-blue-600 text-white rounded-br-none"
+                        : "bg-neutral-800 text-neutral-200 rounded-bl-none"
+                    }`}
+                  >
+                    {displayText}
+                  </div>
+                  <span className="text-[10px] text-neutral-500 mt-1 px-1">
+                    {isMe ? "Yo" : otherNameEffective} · {new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
     </main>
   );
 }
