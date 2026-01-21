@@ -744,7 +744,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     trInFlightRef.current = true;
     oaiSend({
       type: "response.create",
-      response: { output_modalities: ["audio","text"] },
+      response: { output_modalities: ["audio"] },
     });
   }
   function queueTranslationRequest() {
@@ -838,8 +838,6 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
         // ✅ aro dorado cuando el traductor habla
         try { vadCleanupTrRef.current?.(); } catch {}
         vadCleanupTrRef.current = setupVAD(e.streams[0], setTranslatorSpeaking, 0.02);
-
-        if (remoteAudioRef.current) remoteAudioRef.current.muted = true;
 
         try {
           await el.play();
