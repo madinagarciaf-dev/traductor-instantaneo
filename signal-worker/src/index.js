@@ -21,6 +21,11 @@ const EMPTY_ROOM_STATE = {
   guest: { name: "", lang: "" },
 };
 
+const EMPTY_AGENT_STATE = {
+  creator: false,
+  guest: false,
+};
+
 export class RoomDO {
   constructor(state, env) {
     this.state = state;
@@ -65,6 +70,20 @@ export class RoomDO {
   async getRoomState() {
     const s = await this.state.storage.get("roomState");
     return s ?? EMPTY_ROOM_STATE;
+  }
+
+  async getAgentState() {
+    const s = await this.state.storage.get("agentState");
+    return s ?? EMPTY_AGENT_STATE;
+  }
+
+  async setAgentState(next) {
+    await this.state.storage.put("agentState", next);
+  }
+
+  async broadcastAgentState() {
+    const agentState = await this.getAgentState();
+    this.broadcast({ type: "agent_state", agentState });
   }
 
   async setRoomState(nextState) {
@@ -145,7 +164,22 @@ export class RoomDO {
       this.broadcast({ type: "transcript", payload: data.payload }, clientId);
       return;
     }
+    // NUEVO: Rebotar “agente hablando” (para aro dorado sincronizado)
+    if (data?.type === "agent_speaking") {
+      const { targetRole, speaking } = data?.payload ?? {};
+      if (targetRole !== "creator" && targetRole !== "guest") return;
+
+      const current = await this.getAgentState();
+      const next = { ...current, [targetRole]: !!speaking };
+
+      await this.setAgentState(next);
+      await this.broadcast({ type: "agent_state", agentState: next });
+      return;
+    }
+
+
   }
+
 
   async fetch(request) {
     if (request.headers.get("Upgrade") !== "websocket") {
@@ -168,7 +202,8 @@ export class RoomDO {
     const roomState = await this.getRoomState();
 
     // hello + peers + roomState
-    server.send(JSON.stringify({ type: "hello", serverId, clientId, role, roomState }));
+    const agentState = await this.getAgentState();
+    server.send(JSON.stringify({ type: "hello", serverId, clientId, role, roomState, agentState }));
     this.broadcastPeers();
 
     server.addEventListener("message", (ev) => {
@@ -187,6 +222,17 @@ export class RoomDO {
       this.sockets.delete(clientId);
       this.meta.delete(clientId);
       this.broadcastPeers();
+
+      // si la sala queda vacía, reseteamos agentState en background
+      if (this.sockets.size === 0) {
+        (async () => {
+          try {
+            await this.setAgentState(EMPTY_AGENT_STATE);
+            // opcional: también podrías resetear roomState si quieres
+            // await this.setRoomState(EMPTY_ROOM_STATE);
+          } catch {}
+        })();
+      }
     };
     server.addEventListener("close", onClose);
     server.addEventListener("error", onClose);

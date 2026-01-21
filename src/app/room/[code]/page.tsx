@@ -28,7 +28,9 @@ type WsMsg =
   | { type: "init_room"; payload: RoomState }
   | { type: "profile"; payload: { name?: string; lang?: string } }
   | { type: "signal"; payload: any }
-  | { type: "transcript"; payload: { text: string; timestamp: number } };
+  | { type: "transcript"; payload: { text: string; timestamp: number } }
+  | { type: "agent_state"; agentState: { creator: boolean; guest: boolean } }
+  | { type: "agent_speaking"; payload: { targetRole: "creator" | "guest"; speaking: boolean } };
 
 type TranscriptItem = {
   id: string;
@@ -175,8 +177,14 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
   const oaiDcRef = useRef<RTCDataChannel | null>(null);
   // Control backlog
   const trInFlightRef = useRef(false);   // el traductor está generando/sonando
-  const trPendingRef = useRef(false);    // ha habido speech_stopped mientras estaba ocupado
+  const trPendingCountRef = useRef(0);   // nº de traducciones pendientes mientras el traductor está ocupado
   const trAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Emparejar turnos (input) -> traducción (output)
+  const pendingPeerIdsRef = useRef<string[]>([]);     // cola de ids que esperan translated
+  const orphanTranslationsRef = useRef<string[]>([]); // traducciones que llegaron antes que el item
+  const handledResponseIdsRef = useRef<Set<string>>(new Set()); // evita doble-consumo
+
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const trSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
@@ -192,6 +200,11 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
   const vadCleanupLocalRef = useRef<null | (() => void)>(null);
   const vadCleanupRemoteRef = useRef<null | (() => void)>(null);
   const [translatorSpeaking, setTranslatorSpeaking] = useState(false);
+  const [agentSpeakingByRole, setAgentSpeakingByRole] = useState<{ creator: boolean; guest: boolean }>({
+    creator: false,
+    guest: false,
+  });
+
   //Estados para transcripción
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
   const [showTranscript, setShowTranscript] = useState(false);
@@ -277,6 +290,14 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
   // ======= Derivados de estado de sala =======
   const me = myRole === "creator" ? roomState?.creator : myRole === "guest" ? roomState?.guest : null;
   const other = myRole === "creator" ? roomState?.guest : myRole === "guest" ? roomState?.creator : null;
+  type RoleKey = "creator" | "guest";
+
+  const myRoleKey: RoleKey | null =
+    myRole === "creator" || myRole === "guest" ? myRole : null;
+
+  const otherRoleKey: RoleKey | null =
+    myRole === "creator" ? "guest" : myRole === "guest" ? "creator" : null;
+
 
   const myLangEffective = (myLangDraft || me?.lang || qsMy).trim();
   const peerLangEffective = (other?.lang || qsPeer).trim();
@@ -321,7 +342,12 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
             role === "creator" ? msg.roomState.creator?.lang : role === "guest" ? msg.roomState.guest?.lang : "";
           if (!myLangTouchedRef.current && myLangFromRoom) setMyLangDraft(myLangFromRoom);
         }
-
+        if (msg.agentState) {
+          setAgentSpeakingByRole({
+            creator: !!msg.agentState.creator,
+            guest: !!msg.agentState.guest,
+          });
+        }
         // INIT de sala: solo lo intenta el creator (el DO ignora si ya está init)
         if (!didInitRoomRef.current && role === "creator") {
           didInitRoomRef.current = true;
@@ -376,6 +402,24 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
 
         return;
       }
+
+      if (msg.type === "agent_speaking") {
+        const { targetRole, speaking } = msg.payload ?? {};
+        if (targetRole === "creator" || targetRole === "guest") {
+          setAgentSpeakingByRole((prev) => ({ ...prev, [targetRole]: !!speaking }));
+        }
+        return;
+      }
+
+      if (msg.type === "agent_state") {
+        const s = msg.agentState ?? {};
+        setAgentSpeakingByRole({
+          creator: !!s.creator,
+          guest: !!s.guest,
+        });
+        return;
+      }
+
       
       if (msg.type === "signal") {
         await handleSignal(msg.payload);
@@ -407,6 +451,20 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code]);
+
+  useEffect(() => {
+    if (!otherRoleKey) return;
+
+    // Si no está connected, forzamos "false" para no dejar el aro colgado
+    const speaking = trStatus === "connected" ? translatorSpeaking : false;
+
+    sendWs({
+      type: "agent_speaking",
+      payload: { targetRole: otherRoleKey, speaking },
+    });
+  }, [translatorSpeaking, trStatus, otherRoleKey]);
+
+
 
   // ======= PeerConnection =======
   async function ensurePeerConnection() {
@@ -570,7 +628,11 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
         pc.addTrack(track, local);
       }
 
-      const iAmCaller = myLangEffective < peerLangEffective; // determinista
+      const iAmCaller =
+        myRole === "creator" ? true :
+        myRole === "guest" ? false :
+        myLangEffective < peerLangEffective; // fallback si aún está "unknown"
+
       if (!iAmCaller && (remoteDescSetRef.current || pc.connectionState === "connected")) {
         sendSignal({ kind: "need_offer" });
       }
@@ -591,7 +653,10 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
             for (const track of local2.getAudioTracks()) newPc.addTrack(track, local2);
           }
 
-          const iAmCaller2 = myLangEffective < peerLangEffective;
+          const iAmCaller2 =
+            myRole === "creator" ? true :
+            myRole === "guest" ? false :
+            myLangEffective < peerLangEffective;
           if (iAmCaller2) {
             const offer2 = await newPc.createOffer();
             await newPc.setLocalDescription(offer2);
@@ -615,7 +680,11 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     const pc = await ensurePeerConnection();
 
     if (payload?.kind === "need_offer") {
-      const iAmCaller = myLangEffective < peerLangEffective;
+      const iAmCaller =
+        myRole === "creator" ? true :
+        myRole === "guest" ? false :
+        myLangEffective < peerLangEffective;
+
       if (iAmCaller) {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
@@ -675,9 +744,43 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     trInFlightRef.current = true;
     oaiSend({
       type: "response.create",
-      response: { output_modalities: ["audio"] },
+      response: { output_modalities: ["audio","text"] },
     });
   }
+  function queueTranslationRequest() {
+    // 1 turno de usuario => 1 requestTranslation garantizada (sin perder backlog)
+    if (!trInFlightRef.current) {
+      requestTranslation();
+    } else {
+      trPendingCountRef.current += 1;
+    }
+  }
+
+  function applyTranslationToNextPeer(text: string, responseId?: string) {
+    const t = (text ?? "").trim();
+    if (!t) return;
+
+    // Evita consumir dos veces por el mismo response (p.ej. output_text + output_audio_transcript)
+    if (responseId) {
+      if (handledResponseIdsRef.current.has(responseId)) return;
+    }
+
+    const q = pendingPeerIdsRef.current;
+    if (q.length === 0) {
+      // Llegó traducción antes que el item (rare pero pasa)
+      orphanTranslationsRef.current.push(t);
+      if (responseId) handledResponseIdsRef.current.add(responseId);
+      return;
+    }
+
+    const targetId = q.shift()!;
+    setTranscripts((prev) =>
+      prev.map((x) => (x.id === targetId ? { ...x, translated: t } : x))
+    );
+
+    if (responseId) handledResponseIdsRef.current.add(responseId);
+  }
+
 
   // ======= Traducción OpenAI =======
   const startTranslation = async () => {
@@ -741,10 +844,17 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
         try {
           await el.play();
           setNeedsTrPlay(false);
+
+          // ✅ solo muteamos el remoto cuando el traducido está sonando
+          if (remoteAudioRef.current) remoteAudioRef.current.muted = true;
         } catch (err) {
           console.warn("translated audio play() blocked:", err);
           setNeedsTrPlay(true);
+
+          // ✅ si está bloqueado, NO silencies el remoto o te quedas sin audio
+          if (remoteAudioRef.current) remoteAudioRef.current.muted = false;
         }
+
       };
 
 
@@ -764,72 +874,82 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
         // NUEVO: Capturar transcripción del OTRO (input)
         if (evt.type === "conversation.item.input_audio_transcription.completed") {
           const text = evt.transcript?.trim();
-          if (text) {
-             // 1. Guardar en mi lista como "peer" (original)
-             const newItem: TranscriptItem = {
-               id: evt.item_id || crypto.randomUUID(),
-               speaker: "peer",
-               timestamp: Date.now(),
-               original: text,
-               translated: "...", // Esperando traducción...
-             };
-             
-             setTranscripts(prev => [...prev, newItem]);
+          if (!text) return;
 
-             // 2. Enviar al otro usuario (Espejo) para que sepa qué dijo
-             sendWs({ 
-               type: "transcript", 
-               payload: { text, timestamp: newItem.timestamp } 
-             });
+          const id = evt.item_id || crypto.randomUUID();
+          const timestamp = Date.now();
+
+          // Si ya tenemos una traducción “huérfana”, úsala al crear el item
+          const orphan = orphanTranslationsRef.current.length
+            ? orphanTranslationsRef.current.shift()!
+            : null;
+
+          setTranscripts((prev) => [
+            ...prev,
+            {
+              id,
+              speaker: "peer",
+              timestamp,
+              original: text,
+              translated: orphan ?? "…", // ✅ no se quedará infinito
+            },
+          ]);
+
+          // Solo queda pendiente si NO se pudo rellenar con orphan
+          if (!orphan) {
+            pendingPeerIdsRef.current.push(id);
+            queueTranslationRequest();
           }
+
+          // espejo al otro usuario (para que vea su “me”)
+          sendWs({
+            type: "transcript",
+            payload: { text, timestamp },
+          });
+
         }
 
-        // NUEVO: Capturar la traducción (response)
-        if (evt.type === "response.audio_transcript.done") {
+
+        // ✅ 1) Transcript del audio de salida (cuando el modelo está generando audio)
+        // Compat: a veces llega como "response.audio_transcript.done"
+        if (
+          evt.type === "response.output_audio_transcript.done" ||
+          evt.type === "response.audio_transcript.done"
+        ) {
           const text = evt.transcript?.trim();
-          if (text) {
-             // Actualizamos el último mensaje del peer con la traducción
-             setTranscripts(prev => {
-               const copy = [...prev];
-               // Buscamos el último mensaje del peer que no tenga traducción
-               // O simplemente el último mensaje del peer (simplificación eficaz)
-               const lastPeerIndex = copy.findLastIndex(t => t.speaker === "peer");
-               if (lastPeerIndex !== -1) {
-                 copy[lastPeerIndex] = { ...copy[lastPeerIndex], translated: text };
-               }
-               return copy;
-             });
-          }
-        }
-        
-
-        // 1) Cuando el VAD detecta fin de habla: marcamos que hay algo pendiente
-        if (evt.type === "input_audio_buffer.speech_stopped") {
-          // Si el traductor está libre, pedimos respuesta ya.
-          if (!trInFlightRef.current) {
-            requestTranslation();
-          } else {
-            // Si está ocupado, lo dejamos en backlog
-            trPendingRef.current = true;
-          }
+          if (!text) return;
+          applyTranslationToNextPeer(text, evt.response_id);
           return;
         }
+
+        // ✅ 2) Texto de salida (fallback / también útil si pides output_modalities: ["audio","text"])
+        if (evt.type === "response.output_text.done") {
+          const text = evt.text?.trim();
+          if (!text) return;
+          applyTranslationToNextPeer(text, evt.response_id);
+          return;
+        }
+
+        
+
+
 
         // 2) Cuando termina una respuesta: si había backlog, pedimos otra
         if (evt.type === "response.done") {
           trInFlightRef.current = false;
 
-          if (trPendingRef.current) {
-            trPendingRef.current = false;
+          if (trPendingCountRef.current > 0) {
+            trPendingCountRef.current -= 1;
             requestTranslation();
           }
           return;
         }
 
+
         // 3) Si OpenAI devuelve error
         if (evt.type === "error") {
           trInFlightRef.current = false;
-          trPendingRef.current = false;
+          trPendingCountRef.current = 0;
           setTrStatus("error");
           setTrError(evt?.error?.message ?? "OpenAI realtime error");
           return;
@@ -868,15 +988,24 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     try {
       await el.play();
       setNeedsTrPlay(false);
+      if (remoteAudioRef.current) remoteAudioRef.current.muted = true;
     } catch (e) {
       console.warn("Still blocked:", e);
     }
   };
 
   const stopTranslation = async () => {
+    // IMPORTANTE: apaga el aro dorado global del “otro” al parar
+    if (otherRoleKey) {
+      sendWs({ type: "agent_speaking", payload: { targetRole: otherRoleKey, speaking: false } });
+    }
     // ✅ 1) Limpia flags de backlog (muy importante)
     trInFlightRef.current = false;
-    trPendingRef.current = false;
+    trPendingCountRef.current = 0;
+    pendingPeerIdsRef.current = [];
+    orphanTranslationsRef.current = [];
+    handledResponseIdsRef.current.clear();
+
 
     // ✅ 2) (Opcional pero recomendado) Cancela cualquier respuesta en curso en OpenAI
     try {
@@ -954,6 +1083,14 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
       ? "Audio conectado ✅"
       : "Error de audio";
 
+  const agentOnMe = myRoleKey ? agentSpeakingByRole[myRoleKey] : false;
+
+  // En “otro” usamos el estado global (lo vean ambos) y además el local como fallback
+  const agentOnOther =
+    (otherRoleKey ? agentSpeakingByRole[otherRoleKey] : false) ||
+    (trStatus === "connected" && translatorSpeaking);
+
+
 return (
     <main className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col relative overflow-x-hidden">
       {/* Top bar */}
@@ -980,7 +1117,7 @@ return (
             title="Yo"
             name={myNameEffective}
             speaking={meSpeaking}
-            translatorSpeaking={false}
+            translatorSpeaking={agentOnMe}
             waitingText={waitingText}
           />
 
@@ -989,7 +1126,7 @@ return (
               title="Otro" 
               name={otherNameEffective} 
               speaking={otherSpeaking} 
-              translatorSpeaking={trStatus === "connected" && translatorSpeaking} 
+              translatorSpeaking={agentOnOther}
             />
           )}
         </div>
